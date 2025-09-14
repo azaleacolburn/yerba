@@ -57,6 +57,18 @@ impl LinkedListAllocator {
 
         block_ptr
     }
+
+    /// Finds the block representing the given pointer
+    fn find_ptr_block(&self, ptr: *const u8) -> *mut Block {
+        let mut block = &self.head as *const Block as *mut Block;
+        unsafe {
+            while !(*block).data.addr() == ptr.addr() && !block.is_null() {
+                block = (*block).next;
+            }
+        }
+
+        block
+    }
 }
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
@@ -78,7 +90,13 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         ptr
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        let block = self.find_ptr_block(ptr);
+
+        unsafe {
+            (*block).used = false;
+        }
+    }
 
     unsafe fn realloc(
         &self,
