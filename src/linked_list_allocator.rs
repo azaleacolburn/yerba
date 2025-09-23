@@ -1,6 +1,4 @@
-use core::{alloc::GlobalAlloc, cell::UnsafeCell, char::MAX, ptr};
-
-use libc::sbrk;
+use core::{alloc::GlobalAlloc, cell::UnsafeCell, ptr};
 
 const BUF_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -15,30 +13,30 @@ struct Block {
 }
 
 impl Block {
-    pub fn used(&self) -> bool {
-        let offset_rev = if cfg!(target_endian = "big") {
-            self.offset.to_le()
-        } else {
-            self.offset.to_be()
-        };
+    pub fn new(size: usize, offset: usize) -> Block {
+        Block { size, offset }
+    }
+    pub fn offset(&mut self, offset: usize) {
+        let used: bool = self.used();
+        self.offset = offset;
+        self.set_used(used);
+    }
 
-        offset_rev & 1 == 1
+    pub fn used(&self) -> bool {
+        // TODO Might be faster to just shift
+        self.offset.reverse_bits() & 1 == 1
+    }
+
+    pub fn set_used(&mut self, used: bool) {
+        self.offset &= (used as usize) << (size_of::<usize>() * 8 - 1);
     }
 
     pub fn free(&mut self) {
-        if cfg!(target_endian = "big") {
-            self.offset &= 1;
-        } else {
-            self.offset &= 1 << (size_of::<usize>() * 8);
-        };
+        self.set_used(false)
     }
 
-    pub fn allocate(&mut self) {
-        if cfg!(target_endian = "big") {
-            self.offset &= 0;
-        } else {
-            self.offset &= 1 << (size_of::<usize>() * 8);
-        };
+    pub fn mark_used(&mut self) {
+        self.set_used(true)
     }
 }
 
@@ -50,7 +48,6 @@ fn get_data(block_ptr: *const Block) -> *mut u8 {
 /// head is initially set to buf
 struct LinkedListAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
-    blocks: [Block; BUF_SIZE / MAX_ALIGN],
 }
 
 fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
@@ -69,13 +66,11 @@ impl LinkedListAllocator {
             assert!(size_of::<Block>() < BUF_SIZE);
         }
         unsafe {
-            buf.get().write(as_u8_slice(&head).try_into().unwrap());
+            let block = as_u8_slice(&head);
+            buf.get().cast::<&[u8]>().write(block);
         }
 
-        Self {
-            blocks: [head; BUF_SIZE / MAX_ALIGN],
-            buf,
-        }
+        Self { buf }
     }
 
     fn next_block(&self, block_ptr: *mut Block) -> *mut Block {
@@ -88,10 +83,11 @@ impl LinkedListAllocator {
 
     fn find_empty_block(&self, size: usize, align: usize) -> *mut Block {
         let mut last_block_ptr: *mut Block = ptr::null_mut();
-        let mut block_ptr = &self.blocks[0] as *const Block as *mut Block;
+        let mut block_ptr = self.first_block();
         if align > MAX_ALIGN {
             return ptr::null_mut();
         }
+
         while !block_ptr.is_null() {
             let block = unsafe { block_ptr.read() };
             if block.used() {
@@ -110,7 +106,9 @@ impl LinkedListAllocator {
                 }
                 break;
             } else if unsafe {
-                block.size + (*last_block_ptr).size >= size + alignment_offset + size_of::<Block>()
+                !last_block_ptr.is_null()
+                    && block.size + (*last_block_ptr).size
+                        >= size + alignment_offset + size_of::<Block>()
                     && !(*last_block_ptr).used()
             } {
                 // We've found a pair of free blocks that can be merged to fit
@@ -132,7 +130,7 @@ impl LinkedListAllocator {
     }
 
     fn first_block(&self) -> *mut Block {
-        &self.blocks[0] as *const Block as *mut Block
+        self.buf_ptr() as *mut Block
     }
 
     fn buf_ptr(&self) -> *mut u8 {
@@ -170,8 +168,12 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             return ptr::null_mut();
         }
 
-        let (block_size, block_next_ptr) =
-            unsafe { ((*block).size - size, self.next_block(block)) };
+        let (block_size, block_next_ptr) = unsafe {
+            (*block).mark_used();
+
+            ((*block).size - size, self.next_block(block))
+        };
+
         if block_size > size
             && (self.buf_ptr().addr() + block_next_ptr.addr()) + size_of::<Block>() < BUF_SIZE
         {
@@ -192,11 +194,12 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let block = self.find_ptr_block(ptr);
 
         unsafe {
-            (*block).used() = false;
+            (*block).free();
             (*block).offset = 0;
         }
     }
 
+    // TODO Fix Infinite Loop
     unsafe fn realloc(
         &self,
         ptr: *mut u8,
@@ -207,9 +210,9 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let block_ptr = self.find_ptr_block(ptr);
         let mut frontier_ptr = self.next_block(block_ptr);
         let mut acc_size = 0;
-        while acc_size < new_size {
+        while acc_size < new_size && !frontier_ptr.is_null() {
             let frontier = unsafe { *frontier_ptr };
-            if !frontier.used {
+            if !frontier.used() {
                 break;
             }
 
@@ -225,13 +228,13 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             frontier_ptr = unsafe { frontier_ptr.add(1) };
         }
         // Then start at the first block and check for available adjacent blocks again
-        let mut head = self.buf_ptr() as *mut Block;
+        let mut head = self.first_block();
         while !head.is_null() {
             acc_size = 0;
             frontier_ptr = head;
             while acc_size < new_size && !frontier_ptr.is_null() {
                 let frontier = unsafe { *frontier_ptr };
-                if !frontier.used {
+                if !frontier.used() {
                     break;
                 }
 
@@ -258,6 +261,10 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let size = layout.size();
         unsafe {
             let ptr = self.alloc(layout);
+            if ptr.is_null() {
+                return ptr::null_mut();
+            }
+
             ptr.write_bytes(0, size);
             ptr
         }
@@ -272,7 +279,7 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let allocator = StackAllocator::new();
+        let allocator = LinkedListAllocator::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
