@@ -63,7 +63,9 @@ impl LinkedListAllocator {
         };
 
         const {
-            assert!(size_of::<Block>() < BUF_SIZE);
+            let block_size = size_of::<Block>();
+            assert!(block_size < BUF_SIZE);
+            assert!(block_size % 8 == 0)
         }
         unsafe {
             let block = as_u8_slice(&head);
@@ -212,7 +214,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let mut acc_size = 0;
         while acc_size < new_size && !frontier_ptr.is_null() {
             let frontier = unsafe { *frontier_ptr };
-            if !frontier.used() {
+            if frontier.used() {
                 break;
             }
 
@@ -234,7 +236,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             frontier_ptr = head;
             while acc_size < new_size && !frontier_ptr.is_null() {
                 let frontier = unsafe { *frontier_ptr };
-                if !frontier.used() {
+                if frontier.used() {
                     break;
                 }
 
