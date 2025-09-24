@@ -1,4 +1,11 @@
-use core::{alloc::GlobalAlloc, cell::UnsafeCell, ptr};
+use core::{
+    alloc::GlobalAlloc,
+    cell::UnsafeCell,
+    ops::Deref,
+    ptr::{self},
+};
+
+use libc::printf;
 
 const BUF_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -16,19 +23,37 @@ impl Block {
     pub fn new(size: usize, offset: usize) -> Block {
         Block { size, offset }
     }
-    pub fn offset(&mut self, offset: usize) {
+}
+
+struct BlockPtr(*mut Block);
+
+impl BlockPtr {
+    pub fn null() -> BlockPtr {
+        BlockPtr(ptr::null_mut())
+    }
+
+    pub fn get_offset(&self) -> usize {
+        unsafe { (*self.0).offset & (0 as usize) << (size_of::<usize>() * 8 - 1) }
+    }
+
+    pub fn set_offset(&mut self, offset: usize) {
         let used: bool = self.used();
-        self.offset = offset;
+        unsafe {
+            (*self.0).offset = offset;
+        }
         self.set_used(used);
     }
 
     pub fn used(&self) -> bool {
         // TODO Might be faster to just shift
-        self.offset.reverse_bits() & 1 == 1
+        unsafe { (*self.0).offset.reverse_bits() & 1 == 1 }
     }
 
-    pub fn set_used(&mut self, used: bool) {
-        self.offset &= (used as usize) << (size_of::<usize>() * 8 - 1);
+    fn set_used(&mut self, used: bool) {
+        let used = if used { 1 } else { 0 };
+        unsafe {
+            (*self.0).offset |= (used as usize) << (size_of::<usize>() * 8 - 1);
+        }
     }
 
     pub fn free(&mut self) {
@@ -38,11 +63,40 @@ impl Block {
     pub fn mark_used(&mut self) {
         self.set_used(true)
     }
+
+    pub fn size(&self) -> usize {
+        unsafe { (*self.0).size }
+    }
+
+    pub fn add_size(&self, size: usize) {
+        unsafe { (*self.0).size += size }
+    }
+
+    pub fn set_size(&self, size: usize) {
+        unsafe { (*self.0).size = size }
+    }
+
+    pub fn set(&mut self, ptr: &BlockPtr) {
+        self.0 = ptr.0
+    }
+
+    fn get_data(&self) -> *mut u8 {
+        let offset = self.get_offset();
+        unsafe { self.add(1).byte_add(offset).cast::<u8>() as *mut u8 }
+    }
 }
 
-fn get_data(block_ptr: *const Block) -> *mut u8 {
-    let offset = unsafe { block_ptr.read().offset };
-    unsafe { block_ptr.add(1).byte_add(offset).cast::<u8>() as *mut u8 }
+impl Deref for BlockPtr {
+    type Target = *mut Block;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<*mut Block> for BlockPtr {
+    fn from(value: *mut Block) -> Self {
+        BlockPtr(value)
+    }
 }
 
 /// head is initially set to buf
@@ -75,64 +129,99 @@ impl LinkedListAllocator {
         Self { buf }
     }
 
-    fn next_block(&self, block_ptr: *mut Block) -> *mut Block {
-        let block = unsafe { *(block_ptr) };
-        if block.offset + block.size + block_ptr.addr() > self.buf_ptr().addr() + BUF_SIZE {
-            return ptr::null_mut();
+    fn next_block(&self, block_ptr: &BlockPtr) -> BlockPtr {
+        if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
+            > self.buf_ptr().addr() + BUF_SIZE
+        {
+            return BlockPtr::null();
         }
-        unsafe { block_ptr.byte_add(block.offset + block.size) }
+        unsafe {
+            block_ptr
+                .byte_add(block_ptr.get_offset() + block_ptr.size())
+                .into()
+        }
     }
 
-    fn find_empty_block(&self, size: usize, align: usize) -> *mut Block {
-        let mut last_block_ptr: *mut Block = ptr::null_mut();
+    fn next_block_place(&self, block_ptr: &BlockPtr, size: usize) -> BlockPtr {
+        if block_ptr.get_offset() + size + block_ptr.addr() > self.buf_ptr().addr() + BUF_SIZE {
+            return BlockPtr::null();
+        }
+        unsafe { block_ptr.byte_add(block_ptr.get_offset() + size).into() }
+    }
+
+    fn find_empty_block(&self, size: usize, align: usize) -> BlockPtr {
+        let mut last_block_ptr = BlockPtr::null();
         let mut block_ptr = self.first_block();
         if align > MAX_ALIGN {
-            return ptr::null_mut();
+            return BlockPtr::null();
         }
 
         while !block_ptr.is_null() {
-            let block = unsafe { block_ptr.read() };
-            if block.used() {
-                continue;
-            }
-            let data_ptr = unsafe { block_ptr.add(1).cast::<u8>() };
-            let alignment_offset = data_ptr.align_offset(align);
-            if alignment_offset == usize::MAX {
-                return ptr::null_mut();
-            }
-            if block.size >= size + alignment_offset + size_of::<Block>() {
-                // TODO Verify that this work
+            unsafe {
+                printf("testing\0" as *const str as *const u8);
+                if block_ptr.used() {
+                    continue;
+                }
+
+                // We don't actually use this pointer again, it's just for calculating the offset
+                let data_ptr = block_ptr.add(1).cast::<u8>();
+                let alignment_offset = data_ptr.align_offset(align);
+                if alignment_offset == usize::MAX
+                    // Checks that we're not overflowing
+                    || data_ptr.add(alignment_offset + size).addr() > self.last_addr()
+                {
+                    return BlockPtr::null();
+                }
+
+                let required_size = size + alignment_offset + size_of::<Block>();
+                let fits = block_ptr.size() >= required_size;
+
                 // We've found a block that fits
-                unsafe {
-                    (*block_ptr).offset = alignment_offset;
-                }
-                break;
-            } else if unsafe {
-                !last_block_ptr.is_null()
-                    && block.size + (*last_block_ptr).size
-                        >= size + alignment_offset + size_of::<Block>()
-                    && !(*last_block_ptr).used()
-            } {
-                // We've found a pair of free blocks that can be merged to fit
-                unsafe {
-                    (*last_block_ptr).offset = alignment_offset;
-                    (*last_block_ptr).size += block.size + size_of::<Block>();
+                if fits {
+                    block_ptr.set_offset(alignment_offset);
 
-                    block_ptr.write_bytes(0, size_of::<Block>());
-                    block_ptr = last_block_ptr;
+                    break;
                 }
-                break;
+
+                // We've found a pair of free blocks that can be merged to fit
+                let mergeable = !last_block_ptr.is_null() && !last_block_ptr.used();
+                if mergeable {
+                    let merged_size = block_ptr.size() + last_block_ptr.size();
+                    let fits_with_merge = merged_size >= required_size;
+
+                    if fits_with_merge {
+                        let data_ptr = last_block_ptr.add(1);
+                        let alignment_offset = data_ptr.align_offset(align);
+                        if alignment_offset == usize::MAX {
+                            return BlockPtr::null();
+                        }
+
+                        last_block_ptr.set_offset(alignment_offset);
+                        last_block_ptr.add_size(
+                            block_ptr.size() + block_ptr.get_offset() + size_of::<Block>(),
+                        );
+
+                        block_ptr.write_bytes(0, size_of::<Block>());
+                        block_ptr = last_block_ptr;
+
+                        break;
+                    }
+                }
             }
 
-            last_block_ptr = block_ptr;
-            block_ptr = self.next_block(block_ptr);
+            last_block_ptr.set(&block_ptr);
+            block_ptr.set(&self.next_block(&block_ptr));
         }
 
         block_ptr
     }
 
-    fn first_block(&self) -> *mut Block {
-        self.buf_ptr() as *mut Block
+    fn first_block(&self) -> BlockPtr {
+        BlockPtr(self.buf_ptr() as *mut Block)
+    }
+
+    fn last_addr(&self) -> usize {
+        unsafe { self.buf_ptr().add(BUF_SIZE).addr() }
     }
 
     fn buf_ptr(&self) -> *mut u8 {
@@ -140,11 +229,11 @@ impl LinkedListAllocator {
     }
 
     /// Finds the block representing the given data pointer
-    fn find_ptr_block(&self, ptr: *const u8) -> *mut Block {
+    fn find_ptr_block(&self, ptr: *const u8) -> BlockPtr {
         let mut block = self.first_block();
         unsafe {
-            while !block.add((*block).offset).addr() == ptr.addr() && !block.is_null() {
-                block = self.next_block(block);
+            while !block.byte_add(block.get_offset()).addr() == ptr.addr() && !block.is_null() {
+                block.set(&self.next_block(&block));
             }
         }
 
@@ -157,12 +246,12 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let size = layout.size();
         let align = layout.align();
 
-        let block = self.find_empty_block(size, align);
+        let mut block = self.find_empty_block(size, align);
         if block.is_null() {
             return ptr::null_mut();
         }
 
-        let data_ptr = get_data(block);
+        let data_ptr = block.get_data();
 
         let end_of_block = data_ptr.addr() + size;
         let top_of_buf = unsafe { self.buf.get().byte_add(BUF_SIZE).addr() };
@@ -170,17 +259,15 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             return ptr::null_mut();
         }
 
-        let (block_size, block_next_ptr) = unsafe {
-            (*block).mark_used();
+        block.mark_used();
+        assert!(block.used());
 
-            ((*block).size - size, self.next_block(block))
-        };
+        // TODO HUH
+        let block_next_ptr = self.next_block_place(&block, size);
 
-        if block_size > size
-            && (self.buf_ptr().addr() + block_next_ptr.addr()) + size_of::<Block>() < BUF_SIZE
-        {
+        if block.size() > size && (block_next_ptr.addr() + size_of::<Block>()) < BUF_SIZE {
             let new_block = Block {
-                size: block_size - size,
+                size: block.size() - size,
                 offset: 0,
             };
 
@@ -193,12 +280,10 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        let block = self.find_ptr_block(ptr);
+        let mut block = self.find_ptr_block(ptr);
 
-        unsafe {
-            (*block).free();
-            (*block).offset = 0;
-        }
+        block.free();
+        block.set_offset(0);
     }
 
     // TODO Fix Infinite Loop
@@ -209,50 +294,48 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         new_size: usize,
     ) -> *mut u8 {
         // First look forward for adjacent free blocks
-        let block_ptr = self.find_ptr_block(ptr);
-        let mut frontier_ptr = self.next_block(block_ptr);
+        let mut block_ptr = self.find_ptr_block(ptr);
+        let mut frontier = self.next_block(&block_ptr);
         let mut acc_size = 0;
-        while acc_size < new_size && !frontier_ptr.is_null() {
-            let frontier = unsafe { *frontier_ptr };
+        while acc_size < new_size && !frontier.is_null() {
             if frontier.used() {
                 break;
             }
 
-            acc_size += frontier.size + frontier.offset + size_of::<Block>();
+            acc_size += frontier.size() + frontier.get_offset() + size_of::<Block>();
 
             if acc_size >= new_size {
                 let alignment_offset = block_ptr.align_offset(layout.align());
                 unsafe {
-                    (*block_ptr).offset = alignment_offset;
-                    return get_data(block_ptr).add(alignment_offset);
+                    block_ptr.set_offset(alignment_offset);
+                    return block_ptr.get_data().add(alignment_offset);
                 }
             }
-            frontier_ptr = unsafe { frontier_ptr.add(1) };
+            unsafe { frontier.set(&BlockPtr(frontier.add(1))) };
         }
         // Then start at the first block and check for available adjacent blocks again
         let mut head = self.first_block();
         while !head.is_null() {
             acc_size = 0;
-            frontier_ptr = head;
-            while acc_size < new_size && !frontier_ptr.is_null() {
-                let frontier = unsafe { *frontier_ptr };
+            frontier.set(&head);
+            while acc_size < new_size && !frontier.is_null() {
                 if frontier.used() {
                     break;
                 }
 
-                acc_size += frontier.size + frontier.offset + size_of::<Block>();
+                acc_size += frontier.size() + frontier.get_offset() + size_of::<Block>();
 
                 if acc_size >= new_size {
                     let alignment_offset = block_ptr.align_offset(layout.align());
                     unsafe {
-                        (*block_ptr).offset = alignment_offset;
-                        return get_data(block_ptr).add(alignment_offset);
+                        block_ptr.set_offset(alignment_offset);
+                        return block_ptr.get_data().add(alignment_offset);
                     }
                 }
-                frontier_ptr = unsafe { frontier_ptr.add(1) };
+                unsafe { frontier.set(&BlockPtr(frontier.add(1))) };
             }
 
-            head = frontier_ptr;
+            head.set(&frontier);
         }
 
         // TODO Request page
@@ -299,16 +382,30 @@ mod test {
             assert!(!three.is_null());
 
             allocator.dealloc(three, layout);
+            allocator.dealloc(one, layout);
             allocator.dealloc(two, layout);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn overflow() {
+        let allocator = LinkedListAllocator::new();
+        let layout = Layout::new::<[u8; 5000]>();
+
+        unsafe {
+            let one = allocator.alloc(layout);
+            assert!(!one.is_null());
+
             allocator.dealloc(one, layout);
         }
     }
 
     // #[test]
     // #[should_panic]
-    // fn out_of_order() {
+    // fn multiple_overflow() {
     //     let allocator = LinkedListAllocator::new();
-    //     let layout = Layout::new::<[u8; 16]>();
+    //     let layout = Layout::new::<[u8; 2100]>();
     //
     //     unsafe {
     //         let one = allocator.alloc(layout);
@@ -333,6 +430,11 @@ mod test {
             let two = allocator.alloc_zeroed(layout);
             assert!(!two.is_null());
 
+            let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| *(one.wrapping_add(i))).sum();
+            assert_eq!(two_sum, 0);
+            assert_eq!(one_sum, 0);
+
             allocator.dealloc(two, layout);
             allocator.dealloc(one, layout);
         }
@@ -351,8 +453,8 @@ mod test {
             assert!(!two.is_null());
 
             allocator.realloc(two, layout, 32);
-            allocator.dealloc(two, Layout::new::<[u8; 32]>());
             allocator.dealloc(one, layout);
+            allocator.dealloc(two, Layout::new::<[u8; 32]>());
         }
     }
 }
