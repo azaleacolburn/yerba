@@ -52,9 +52,12 @@ impl BlockPtr {
     }
 
     fn set_used(&mut self, used: bool) {
-        let used = if used { 1 } else { 0 };
         unsafe {
-            (*self.0).offset |= (used as usize) << (size_of::<usize>() * 8 - 1);
+            if used {
+                (*self.0).offset &= 0 << (size_of::<usize>() * 8 - 1);
+            } else {
+                (*self.0).offset |= 1 << (size_of::<usize>() * 8 - 1);
+            }
         }
     }
 
@@ -200,7 +203,7 @@ impl LinkedListAllocator {
                     return BlockPtr::null();
                 }
 
-                let required_size = size + alignment_offset + size_of::<Block>();
+                let required_size = size + alignment_offset;
                 let fits = block_ptr.size() >= required_size;
 
                 // We've found a block that fits
@@ -213,6 +216,7 @@ impl LinkedListAllocator {
                 // We've found a pair of free blocks that can be merged to fit
                 let mergeable = !last_block_ptr.is_null() && !last_block_ptr.used();
                 if mergeable {
+                    panic!("here");
                     let merged_size = block_ptr.size() + last_block_ptr.size();
                     let fits_with_merge = merged_size >= required_size;
 
@@ -268,6 +272,17 @@ impl LinkedListAllocator {
         }
 
         block
+    }
+
+    fn number_of_blocks(&self) -> usize {
+        let mut c = 0;
+        let mut head = self.first_block();
+        while !head.is_null() {
+            c += 1;
+            head.set(&self.next_block(&head));
+        }
+
+        c
     }
 }
 
@@ -333,6 +348,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let mut acc_size = block_ptr.size();
         while acc_size < new_size && !frontier.is_null() {
             if frontier.used() {
+                panic!("{}", frontier.addr());
                 break;
             }
 
@@ -347,6 +363,9 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             }
             unsafe { frontier.set(&BlockPtr(frontier.add(1))) };
         }
+        if acc_size > new_size {
+            return ptr;
+        }
         // Then start at the first block and check for available adjacent blocks again
         let mut anchor = self.first_block();
         while !anchor.is_null() {
@@ -354,6 +373,8 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                 anchor.set(&self.next_block(&anchor));
                 continue;
             }
+            let number_of_blocks = self.number_of_blocks();
+            panic!("{}", number_of_blocks);
 
             acc_size = anchor.size();
             frontier.set(&anchor);
@@ -493,11 +514,8 @@ mod test {
             assert!(!two.is_null());
 
             allocator.realloc(two, layout, 32);
-            panic!("here3");
             allocator.dealloc(one, layout);
-            panic!("here2");
             allocator.dealloc(two, Layout::new::<[u8; 32]>());
-            panic!("here1");
         }
     }
 }
