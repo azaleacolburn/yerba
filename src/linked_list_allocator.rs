@@ -290,7 +290,6 @@ impl LinkedListAllocator {
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        panic!("{}", self.first_block().size());
         let size = layout.size();
         let align = layout.align();
         println!("{}", align);
