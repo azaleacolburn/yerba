@@ -11,23 +11,25 @@ const MAX_ALIGN: usize = 32;
 const MIN_ALIGN: usize = 2;
 
 /// Represents a memory block
+/// The most significant bit of the offset is used to mark whether the block is used
+/// Thus you should never access offset field directly, instead, use the provided API
 #[derive(Debug, Default, Clone, Copy)]
-struct Block {
+struct Header {
     size: usize,
     offset: usize,
 }
 
-impl Block {
-    pub fn new(size: usize, offset: usize) -> Block {
-        Block { size, offset }
+impl Header {
+    pub fn new(size: usize, offset: usize) -> Header {
+        Header { size, offset }
     }
 }
 
-struct BlockPtr(*mut Block);
+struct HeaderPtr(*mut Header);
 
-impl BlockPtr {
-    pub fn null() -> BlockPtr {
-        BlockPtr(ptr::null_mut())
+impl HeaderPtr {
+    pub fn null() -> HeaderPtr {
+        HeaderPtr(ptr::null_mut())
     }
 
     pub fn get_offset(&self) -> usize {
@@ -75,7 +77,7 @@ impl BlockPtr {
         unsafe { (*self.0).size = size }
     }
 
-    pub fn set(&mut self, ptr: &BlockPtr) {
+    pub fn set(&mut self, ptr: &HeaderPtr) {
         self.0 = ptr.0
     }
 
@@ -85,21 +87,23 @@ impl BlockPtr {
     }
 }
 
-impl Deref for BlockPtr {
-    type Target = *mut Block;
+impl Deref for HeaderPtr {
+    type Target = *mut Header;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl From<*mut Block> for BlockPtr {
-    fn from(value: *mut Block) -> Self {
-        BlockPtr(value)
+impl From<*mut Header> for HeaderPtr {
+    fn from(value: *mut Header) -> Self {
+        HeaderPtr(value)
     }
 }
 
 // Headers are inlined to the buffer
-// Only allocates a single buffer and returns a null pointer for allocations past that
+// Only allocates a single arena and returns a null pointer for allocations past that
+// Allows the arbitrary allocation, deallocation, and reallocation of any block
+// Will merge empty blocks when necessary to fit new allocations
 struct LinkedListAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
 }
@@ -111,28 +115,28 @@ fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 impl LinkedListAllocator {
     pub fn new() -> Self {
         let buf = UnsafeCell::new([0; BUF_SIZE]);
-        let head = Block {
+        let head = Header {
             size: BUF_SIZE,
             offset: 0,
         };
 
         const {
-            let block_size = size_of::<Block>();
-            assert!(block_size < BUF_SIZE);
-            assert!(block_size % 8 == 0)
+            let header_size = size_of::<Header>();
+            assert!(header_size < BUF_SIZE);
+            assert!(header_size % 8 == 0)
         }
         unsafe {
-            buf.get().cast::<Block>().write(head);
+            buf.get().cast::<Header>().write(head);
         }
 
         Self { buf }
     }
 
-    fn next_block(&self, block_ptr: &BlockPtr) -> BlockPtr {
+    fn next_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
         if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
             > self.buf_ptr().addr() + BUF_SIZE
         {
-            return BlockPtr::null();
+            return HeaderPtr::null();
         }
         unsafe {
             block_ptr
@@ -141,18 +145,18 @@ impl LinkedListAllocator {
         }
     }
 
-    fn next_empty_block(&self, block_ptr: &BlockPtr) -> BlockPtr {
+    fn next_empty_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
         if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
             > self.buf_ptr().addr() + BUF_SIZE
         {
-            return BlockPtr::null();
+            return HeaderPtr::null();
         }
         unsafe {
-            let mut next: BlockPtr = block_ptr
+            let mut next: HeaderPtr = block_ptr
                 .byte_add(block_ptr.get_offset() + block_ptr.size())
                 .into();
             if next.is_null() {
-                return BlockPtr::null();
+                return HeaderPtr::null();
             }
             if next.used() {
                 next.set(&self.next_empty_block(&next));
@@ -162,18 +166,18 @@ impl LinkedListAllocator {
         }
     }
 
-    fn next_block_place(&self, block_ptr: &BlockPtr, size: usize) -> BlockPtr {
+    fn next_block_place(&self, block_ptr: &HeaderPtr, size: usize) -> HeaderPtr {
         if block_ptr.get_offset() + size + block_ptr.addr() > self.buf_ptr().addr() + BUF_SIZE {
-            return BlockPtr::null();
+            return HeaderPtr::null();
         }
         unsafe { block_ptr.byte_add(block_ptr.get_offset() + size).into() }
     }
 
-    fn find_empty_block(&self, size: usize, align: usize) -> BlockPtr {
-        let mut last_block_ptr = BlockPtr::null();
+    fn find_empty_block(&self, size: usize, align: usize) -> HeaderPtr {
+        let mut last_block_ptr = HeaderPtr::null();
         let mut block_ptr = self.first_block();
         if align > MAX_ALIGN {
-            return BlockPtr::null();
+            return HeaderPtr::null();
         }
 
         while !block_ptr.is_null() {
@@ -190,7 +194,7 @@ impl LinkedListAllocator {
                 let data_ptr = block_ptr.add(1).cast::<u8>();
                 let alignment_offset = data_ptr.align_offset(align);
                 if alignment_offset == usize::MAX {
-                    return BlockPtr::null();
+                    return HeaderPtr::null();
                 }
 
                 let required_size = size + alignment_offset;
@@ -213,15 +217,15 @@ impl LinkedListAllocator {
                         let data_ptr = last_block_ptr.add(1);
                         let alignment_offset = data_ptr.align_offset(align);
                         if alignment_offset == usize::MAX {
-                            return BlockPtr::null();
+                            return HeaderPtr::null();
                         }
 
                         last_block_ptr.set_offset(alignment_offset);
                         last_block_ptr.add_size(
-                            block_ptr.size() + block_ptr.get_offset() + size_of::<Block>(),
+                            block_ptr.size() + block_ptr.get_offset() + size_of::<Header>(),
                         );
 
-                        block_ptr.write_bytes(0, size_of::<Block>());
+                        block_ptr.write_bytes(0, size_of::<Header>());
                         block_ptr = last_block_ptr;
 
                         break;
@@ -237,8 +241,8 @@ impl LinkedListAllocator {
         block_ptr
     }
 
-    fn first_block(&self) -> BlockPtr {
-        BlockPtr(self.buf_ptr() as *mut Block)
+    fn first_block(&self) -> HeaderPtr {
+        HeaderPtr(self.buf_ptr() as *mut Header)
     }
 
     fn last_addr(&self) -> usize {
@@ -250,7 +254,7 @@ impl LinkedListAllocator {
     }
 
     /// Finds the block representing the given data pointer
-    fn find_ptr_block(&self, ptr: *const u8) -> BlockPtr {
+    fn find_ptr_block(&self, ptr: *const u8) -> HeaderPtr {
         let mut block = self.first_block();
         unsafe {
             while block.add(1).byte_add(block.get_offset()).addr() != ptr.addr() && !block.is_null()
@@ -296,12 +300,12 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         // TODO HUH
         let block_next_ptr = self.next_block_place(&block, size);
 
-        if block.size() > size_of::<Block>() + size
-            && (block_next_ptr.addr() + size_of::<Block>()) < self.buf_ptr().addr() + BUF_SIZE
+        if block.size() > size_of::<Header>() + size
+            && (block_next_ptr.addr() + size_of::<Header>()) < self.buf_ptr().addr() + BUF_SIZE
         {
-            let new_block_size = block.size() - size_of::<Block>() - size;
+            let new_block_size = block.size() - size_of::<Header>() - size;
             block.set_size(size);
-            let new_block = Block {
+            let new_block = Header {
                 size: new_block_size,
                 offset: 0,
             };
@@ -338,7 +342,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                 break;
             }
 
-            acc_size += frontier.size() + frontier.get_offset() + size_of::<Block>();
+            acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
 
             if acc_size >= new_size {
                 let alignment_offset = block_ptr.align_offset(layout.align());
@@ -347,7 +351,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                     return block_ptr.get_data().add(alignment_offset);
                 }
             }
-            unsafe { frontier.set(&BlockPtr(frontier.add(1))) };
+            unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
         }
         if acc_size > new_size {
             return ptr;
@@ -369,7 +373,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                     break;
                 }
 
-                acc_size += frontier.size() + frontier.get_offset() + size_of::<Block>();
+                acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
 
                 if acc_size >= new_size {
                     let alignment_offset = block_ptr.align_offset(layout.align());
@@ -378,7 +382,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                         return block_ptr.get_data().add(alignment_offset);
                     }
                 }
-                unsafe { frontier.set(&BlockPtr(frontier.add(1))) };
+                unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
             }
         }
 
