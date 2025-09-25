@@ -1,6 +1,6 @@
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]
-// #![no_std]
+#![no_std]
 #![allow(static_mut_refs)]
 
 // pub mod linear_allocator;

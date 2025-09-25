@@ -1,13 +1,9 @@
 use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
-    ffi::c_str,
-    fmt::Display,
     ops::Deref,
     ptr::{self},
 };
-
-use libc::printf;
 
 const BUF_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -102,7 +98,8 @@ impl From<*mut Block> for BlockPtr {
     }
 }
 
-/// head is initially set to buf
+// Headers are inlined to the buffer
+// Only allocates a single buffer and returns a null pointer for allocations past that
 struct LinkedListAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
 }
@@ -199,7 +196,6 @@ impl LinkedListAllocator {
                 let required_size = size + alignment_offset;
                 let fits = block_ptr.size() >= required_size;
 
-                println!("{} {}", block_ptr.size(), size + alignment_offset);
                 // We've found a block that fits
                 if fits {
                     block_ptr.set_offset(alignment_offset);
@@ -209,11 +205,6 @@ impl LinkedListAllocator {
 
                 // We've found a pair of free blocks that can be merged to fit
                 let mergeable = !last_block_ptr.is_null() && !last_block_ptr.used();
-                println!(
-                    "is_null: {} ",
-                    last_block_ptr.is_null(),
-                    // last_block_ptr.used()
-                );
                 if mergeable {
                     let merged_size = block_ptr.size() + last_block_ptr.size();
                     let fits_with_merge = merged_size >= required_size;
@@ -241,11 +232,6 @@ impl LinkedListAllocator {
             last_block_ptr.set(&block_ptr);
             let next_block = &self.next_block(&block_ptr);
             block_ptr.set(next_block);
-            println!(
-                "after one iter: {} {}",
-                last_block_ptr.addr(),
-                block_ptr.addr()
-            );
         }
 
         block_ptr
@@ -292,7 +278,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let size = layout.size();
         let align = layout.align();
-        println!("{}", align);
 
         let mut block = self.find_empty_block(size, align);
         if block.is_null() {
@@ -315,13 +300,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             && (block_next_ptr.addr() + size_of::<Block>()) < self.buf_ptr().addr() + BUF_SIZE
         {
             let new_block_size = block.size() - size_of::<Block>() - size;
-            println!(
-                "block.size() {} new_size {} old_size {}",
-                block.size(),
-                new_block_size,
-                size
-            );
-
             block.set_size(size);
             let new_block = Block {
                 size: new_block_size,
