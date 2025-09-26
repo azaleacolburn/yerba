@@ -5,7 +5,7 @@ use core::{
     ptr::{self},
 };
 
-const BUF_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
 const MAX_ALIGN: usize = 32;
 const MIN_ALIGN: usize = 2;
@@ -105,7 +105,7 @@ impl From<*mut Header> for HeaderPtr {
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
 // Will merge empty blocks when necessary to fit new allocations
 struct LinkedListAllocator {
-    buf: UnsafeCell<[u8; BUF_SIZE]>,
+    buf: *mut UnsafeCell<[u8]>,
 }
 
 fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
@@ -114,15 +114,16 @@ fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 
 impl LinkedListAllocator {
     pub fn new() -> Self {
-        let buf = UnsafeCell::new([0; BUF_SIZE]);
+        let program_break = unsafe { libc::sbrk(PAGE_SIZE as isize) };
+        let buf = UnsafeCell::new([0; PAGE_SIZE]);
         let head = Header {
-            size: BUF_SIZE,
+            size: PAGE_SIZE,
             offset: 0,
         };
 
         const {
             let header_size = size_of::<Header>();
-            assert!(header_size < BUF_SIZE);
+            assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
         unsafe {
@@ -134,7 +135,7 @@ impl LinkedListAllocator {
 
     fn next_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
         if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
-            > self.buf_ptr().addr() + BUF_SIZE
+            > self.buf_ptr().addr() + PAGE_SIZE
         {
             return HeaderPtr::null();
         }
@@ -147,7 +148,7 @@ impl LinkedListAllocator {
 
     fn next_empty_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
         if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
-            > self.buf_ptr().addr() + BUF_SIZE
+            > self.buf_ptr().addr() + PAGE_SIZE
         {
             return HeaderPtr::null();
         }
@@ -167,7 +168,7 @@ impl LinkedListAllocator {
     }
 
     fn next_block_place(&self, block_ptr: &HeaderPtr, size: usize) -> HeaderPtr {
-        if block_ptr.get_offset() + size + block_ptr.addr() > self.buf_ptr().addr() + BUF_SIZE {
+        if block_ptr.get_offset() + size + block_ptr.addr() > self.buf_ptr().addr() + PAGE_SIZE {
             return HeaderPtr::null();
         }
         unsafe { block_ptr.byte_add(block_ptr.get_offset() + size).into() }
@@ -246,7 +247,7 @@ impl LinkedListAllocator {
     }
 
     fn last_addr(&self) -> usize {
-        unsafe { self.buf_ptr().add(BUF_SIZE).addr() }
+        unsafe { self.buf_ptr().add(PAGE_SIZE).addr() }
     }
 
     fn buf_ptr(&self) -> *mut u8 {
@@ -301,7 +302,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let block_next_ptr = self.next_block_place(&block, size);
 
         if block.size() > size_of::<Header>() + size
-            && (block_next_ptr.addr() + size_of::<Header>()) < self.buf_ptr().addr() + BUF_SIZE
+            && (block_next_ptr.addr() + size_of::<Header>()) < self.buf_ptr().addr() + PAGE_SIZE
         {
             let new_block_size = block.size() - size_of::<Header>() - size;
             block.set_size(size);
