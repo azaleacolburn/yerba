@@ -2,7 +2,7 @@ use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
     ops::Deref,
-    ptr::{self},
+    ptr::{self, slice_from_raw_parts_mut},
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -14,6 +14,7 @@ const MIN_ALIGN: usize = 2;
 /// The most significant bit of the offset is used to mark whether the block is used
 /// Thus you should never access offset field directly, instead, use the provided API
 #[derive(Debug, Default, Clone, Copy)]
+#[repr(C)]
 struct Header {
     size: usize,
     offset: usize,
@@ -114,21 +115,20 @@ fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 
 impl LinkedListAllocator {
     pub fn new() -> Self {
-        let program_break = unsafe { libc::sbrk(PAGE_SIZE as isize) };
-        let buf = UnsafeCell::new([0; PAGE_SIZE]);
-        let head = Header {
-            size: PAGE_SIZE,
-            offset: 0,
-        };
-
         const {
             let header_size = size_of::<Header>();
             assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
-        unsafe {
-            buf.get().cast::<Header>().write(head);
-        }
+        let head = Header {
+            size: PAGE_SIZE,
+            offset: 0,
+        };
+
+        let program_break = unsafe { libc::sbrk(PAGE_SIZE as isize) };
+        let buf =
+            slice_from_raw_parts_mut(program_break as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+        unsafe { buf.cast::<Header>().write(head) };
 
         Self { buf }
     }
