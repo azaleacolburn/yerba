@@ -1,9 +1,14 @@
 use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
+    ffi::c_void,
+    num::NonZeroU8,
     ops::Deref,
-    ptr::{self, slice_from_raw_parts_mut},
+    ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut},
+    sync::atomic::AtomicU8,
 };
+
+use libc::{__errno_location, ENOMEM};
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -13,11 +18,17 @@ const MIN_ALIGN: usize = 2;
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
 /// Thus you should never access offset field directly, instead, use the provided API
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Header {
     size: usize,
     offset: usize,
+}
+
+impl Default for Header {
+    fn default() -> Self {
+        Header::new(PAGE_SIZE - size_of::<Header>(), 0)
+    }
 }
 
 impl Header {
@@ -107,6 +118,7 @@ impl From<*mut Header> for HeaderPtr {
 // Will merge empty blocks when necessary to fit new allocations
 struct LinkedListAllocator {
     buf: *mut UnsafeCell<[u8]>,
+    pages: AtomicU8,
 }
 
 fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
@@ -120,17 +132,25 @@ impl LinkedListAllocator {
             assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
-        let head = Header {
-            size: PAGE_SIZE,
-            offset: 0,
-        };
+        let head = Header::default();
 
-        let program_break = unsafe { libc::sbrk(PAGE_SIZE as isize) };
-        let buf =
-            slice_from_raw_parts_mut(program_break as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
-        unsafe { buf.cast::<Header>().write(head) };
+        unsafe {
+            let old_break = libc::sbrk(0);
+            let program_break = libc::sbrk(PAGE_SIZE as isize);
+            assert_eq!(old_break, program_break);
+            if *__errno_location() == ENOMEM {
+                panic!("Failed to increment program break");
+            }
 
-        Self { buf }
+            let buf =
+                slice_from_raw_parts_mut(old_break as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+            buf.cast::<Header>().write(head);
+
+            Self {
+                buf,
+                pages: AtomicU8::new(1),
+            }
+        }
     }
 
     fn next_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
@@ -177,9 +197,6 @@ impl LinkedListAllocator {
     fn find_empty_block(&self, size: usize, align: usize) -> HeaderPtr {
         let mut last_block_ptr = HeaderPtr::null();
         let mut block_ptr = self.first_block();
-        if align > MAX_ALIGN {
-            return HeaderPtr::null();
-        }
 
         while !block_ptr.is_null() {
             unsafe {
@@ -251,7 +268,7 @@ impl LinkedListAllocator {
     }
 
     fn buf_ptr(&self) -> *mut u8 {
-        self.buf.get().cast()
+        unsafe { (*self.buf).get().cast() }
     }
 
     /// Finds the block representing the given data pointer
@@ -277,12 +294,42 @@ impl LinkedListAllocator {
 
         c
     }
+
+    // Allocates a new page in memory and then returns the new top HeaderPtr
+    // with provenance of PAGE_SIZE
+    fn request_new_page(&self) -> HeaderPtr {
+        let old_top = self.last_addr();
+        let prog_brk = unsafe { libc::sbrk(PAGE_SIZE as isize) };
+        if prog_brk.is_null() {
+            return HeaderPtr::null();
+        }
+        assert_eq!(prog_brk.addr(), old_top + PAGE_SIZE);
+
+        let _ = self
+            .pages
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        let top_ptr =
+            HeaderPtr(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE).cast::<Header>());
+
+        unsafe { top_ptr.cast::<Header>().write(Header::default()) }
+
+        top_ptr
+    }
+
+    fn free_allocator(self) {
+        let pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        unsafe { libc::brk(self.buf.byte_sub(PAGE_SIZE * pages).cast::<c_void>()) };
+    }
 }
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let size = layout.size();
         let align = layout.align();
+        if align > MAX_ALIGN {
+            return ptr::null_mut();
+        }
 
         let mut block = self.find_empty_block(size, align);
         if block.is_null() {
@@ -298,7 +345,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
 
         block.mark_used();
 
-        // TODO HUH
         let block_next_ptr = self.next_block_place(&block, size);
 
         if block.size() > size_of::<Header>() + size
@@ -326,7 +372,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         block.set_offset(0);
     }
 
-    // TODO Fix Infinite Loop
     unsafe fn realloc(
         &self,
         ptr: *mut u8,
@@ -387,8 +432,25 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             }
         }
 
-        // TODO Request page
-        ptr::null_mut()
+        let header = self.request_new_page();
+        // Ideally they don't request more than a page
+        while new_size > header.size() {
+            let top = self.request_new_page();
+            if top.is_null() {
+                return ptr::null_mut();
+            }
+            unsafe { top.write_bytes(0, size_of::<Header>()) };
+        }
+
+        let data_ptr = header.get_data();
+        let alignment_offset = data_ptr.align_offset(layout.align());
+        let data_ptr = unsafe { data_ptr.add(alignment_offset) };
+
+        if new_size + alignment_offset > header.size() {
+            return ptr::null_mut();
+        }
+
+        return data_ptr;
     }
 
     unsafe fn alloc_zeroed(&self, layout: core::alloc::Layout) -> *mut u8 {
@@ -434,20 +496,20 @@ mod test {
             allocator.dealloc(one, layout);
             allocator.dealloc(two, layout);
         }
+
+        allocator.free_allocator();
     }
 
     #[test]
-    #[should_panic]
     fn overflow() {
         let allocator = LinkedListAllocator::new();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
             let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-
-            allocator.dealloc(one, layout);
+            assert!(one.is_null());
         }
+        allocator.free_allocator();
     }
 
     #[test]
@@ -470,6 +532,8 @@ mod test {
             allocator.dealloc(two, layout);
             allocator.dealloc(one, layout);
         }
+
+        allocator.free_allocator();
     }
 
     #[test]
@@ -488,6 +552,8 @@ mod test {
             allocator.dealloc(one, layout);
             allocator.dealloc(two, Layout::new::<[u8; 32]>());
         }
+
+        allocator.free_allocator();
     }
 
     #[test]
@@ -504,5 +570,7 @@ mod test {
             let two = allocator.alloc(layout);
             assert!(!two.is_null());
         }
+
+        allocator.free_allocator();
     }
 }
