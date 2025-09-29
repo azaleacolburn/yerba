@@ -2,13 +2,16 @@ use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
     ffi::c_void,
-    num::NonZeroU8,
+    fmt::Pointer,
     ops::Deref,
-    ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut},
+    ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
 };
 
-use libc::{__errno_location, ENOMEM};
+use libc::{
+    __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
+    PROT_READ, PROT_WRITE,
+};
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -40,6 +43,9 @@ impl Header {
 struct HeaderPtr(*mut Header);
 
 impl HeaderPtr {
+    pub fn new<T: ?Sized>(ptr: *mut T) -> Self {
+        Self(ptr.cast::<Header>())
+    }
     pub fn null() -> HeaderPtr {
         HeaderPtr(ptr::null_mut())
     }
@@ -121,10 +127,6 @@ struct LinkedListAllocator {
     pages: AtomicU8,
 }
 
-fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    unsafe { core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>()) }
-}
-
 impl LinkedListAllocator {
     pub fn new() -> Self {
         const {
@@ -136,14 +138,21 @@ impl LinkedListAllocator {
 
         unsafe {
             let old_break = libc::sbrk(0);
-            let program_break = libc::sbrk(PAGE_SIZE as isize);
-            assert_eq!(old_break, program_break);
-            if *__errno_location() == ENOMEM {
+            let mem_ptr = libc::mmap(
+                old_break,
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                -1,
+                0,
+            );
+            if mem_ptr == MAP_FAILED {
                 panic!("Failed to increment program break");
             }
+            assert_eq!(old_break, mem_ptr);
 
             let buf =
-                slice_from_raw_parts_mut(old_break as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+                slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
             buf.cast::<Header>().write(head);
 
             Self {
@@ -253,6 +262,9 @@ impl LinkedListAllocator {
 
             last_block_ptr.set(&block_ptr);
             let next_block = &self.next_block(&block_ptr);
+            if next_block.is_null() {
+                return self.request_new_page();
+            }
             block_ptr.set(next_block);
         }
 
@@ -299,27 +311,41 @@ impl LinkedListAllocator {
     // with provenance of PAGE_SIZE
     fn request_new_page(&self) -> HeaderPtr {
         let old_top = self.last_addr();
-        let prog_brk = unsafe { libc::sbrk(PAGE_SIZE as isize) };
-        if prog_brk.is_null() {
+        let prog_brk = unsafe {
+            libc::mmap(
+                old_top as *mut c_void,
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if prog_brk == MAP_FAILED {
             return HeaderPtr::null();
         }
-        assert_eq!(prog_brk.addr(), old_top + PAGE_SIZE);
+        assert_eq!(prog_brk.addr(), old_top);
 
         let _ = self
             .pages
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-        let top_ptr =
-            HeaderPtr(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE).cast::<Header>());
-
-        unsafe { top_ptr.cast::<Header>().write(Header::default()) }
+        let top_ptr = HeaderPtr::new(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE));
+        unsafe { top_ptr.write(Header::default()) }
 
         top_ptr
     }
 
     fn free_allocator(self) {
         let pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
-        unsafe { libc::brk(self.buf.byte_sub(PAGE_SIZE * pages).cast::<c_void>()) };
+        unsafe {
+            self.buf.cast::<u8>().write_bytes(0, PAGE_SIZE * pages);
+            libc::munmap(self.buf.cast::<c_void>(), PAGE_SIZE * pages);
+            // libc::brk(self.buf.cast::<c_void>()); // .byte_sub(PAGE_SIZE * pages).cast::<c_void>()
+            // if *__errno_location() == ENOMEM {
+            //     panic!("Failed to increment program break");
+            // }
+        };
     }
 }
 
