@@ -2,13 +2,15 @@ use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
     ffi::c_void,
-    num::NonZeroU8,
     ops::Deref,
-    ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut},
+    ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
 };
 
-use libc::{__errno_location, ENOMEM};
+use libc::{
+    __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
+    PROT_WRITE,
+};
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -121,10 +123,6 @@ struct LinkedListAllocator {
     pages: AtomicU8,
 }
 
-fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    unsafe { core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>()) }
-}
-
 impl LinkedListAllocator {
     pub fn new() -> Self {
         const {
@@ -136,14 +134,14 @@ impl LinkedListAllocator {
 
         unsafe {
             let old_break = libc::sbrk(0);
-            let program_break = libc::sbrk(PAGE_SIZE as isize);
-            assert_eq!(old_break, program_break);
-            if *__errno_location() == ENOMEM {
+            let mem_ptr = libc::mmap(ptr::null_mut(), PAGE_SIZE, PROT_WRITE, MAP_FIXED, -1, 0);
+            if mem_ptr == MAP_FAILED {
                 panic!("Failed to increment program break");
             }
+            assert_eq!(old_break.addr(), mem_ptr.byte_add(PAGE_SIZE).addr());
 
             let buf =
-                slice_from_raw_parts_mut(old_break as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+                slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
             buf.cast::<Header>().write(head);
 
             Self {
@@ -299,7 +297,16 @@ impl LinkedListAllocator {
     // with provenance of PAGE_SIZE
     fn request_new_page(&self) -> HeaderPtr {
         let old_top = self.last_addr();
-        let prog_brk = unsafe { libc::sbrk(PAGE_SIZE as isize) };
+        let prog_brk = unsafe {
+            libc::mmap(
+                old_top as *mut c_void,
+                PAGE_SIZE,
+                PROT_WRITE,
+                MAP_SHARED,
+                MAP_FIXED,
+                0,
+            )
+        };
         if prog_brk.is_null() {
             return HeaderPtr::null();
         }
@@ -319,7 +326,14 @@ impl LinkedListAllocator {
 
     fn free_allocator(self) {
         let pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
-        unsafe { libc::brk(self.buf.byte_sub(PAGE_SIZE * pages).cast::<c_void>()) };
+        unsafe {
+            self.buf.cast::<u8>().write_bytes(0, PAGE_SIZE * pages);
+            libc::munmap(self.buf.cast::<c_void>(), PAGE_SIZE * pages);
+            // libc::brk(self.buf.cast::<c_void>()); // .byte_sub(PAGE_SIZE * pages).cast::<c_void>()
+            // if *__errno_location() == ENOMEM {
+            //     panic!("Failed to increment program break");
+            // }
+        };
     }
 }
 
