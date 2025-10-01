@@ -163,6 +163,12 @@ impl LinkedListAllocator {
     }
 
     fn next_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
+        if block_ptr.size() == 0 {
+            unsafe {
+                block_ptr.write_bytes(0, 1);
+            }
+            return HeaderPtr::null();
+        }
         if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
             > self.buf_ptr().addr() + PAGE_SIZE
         {
@@ -262,6 +268,7 @@ impl LinkedListAllocator {
 
             last_block_ptr.set(&block_ptr);
             let next_block = &self.next_block(&block_ptr);
+            // println!("{}", next_block.addr());
             if next_block.is_null() {
                 return self.request_new_page();
             }
