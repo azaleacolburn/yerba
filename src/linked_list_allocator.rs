@@ -2,6 +2,7 @@ use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
     ffi::c_void,
+    fmt::Pointer,
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
@@ -9,7 +10,7 @@ use core::{
 
 use libc::{
     __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
-    PROT_WRITE,
+    PROT_READ, PROT_WRITE,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -42,6 +43,9 @@ impl Header {
 struct HeaderPtr(*mut Header);
 
 impl HeaderPtr {
+    pub fn new<T: ?Sized>(ptr: *mut T) -> Self {
+        Self(ptr.cast::<Header>())
+    }
     pub fn null() -> HeaderPtr {
         HeaderPtr(ptr::null_mut())
     }
@@ -134,11 +138,18 @@ impl LinkedListAllocator {
 
         unsafe {
             let old_break = libc::sbrk(0);
-            let mem_ptr = libc::mmap(ptr::null_mut(), PAGE_SIZE, PROT_WRITE, MAP_FIXED, -1, 0);
+            let mem_ptr = libc::mmap(
+                old_break,
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                -1,
+                0,
+            );
             if mem_ptr == MAP_FAILED {
                 panic!("Failed to increment program break");
             }
-            assert_eq!(old_break.addr(), mem_ptr.byte_add(PAGE_SIZE).addr());
+            assert_eq!(old_break, mem_ptr);
 
             let buf =
                 slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
@@ -251,6 +262,9 @@ impl LinkedListAllocator {
 
             last_block_ptr.set(&block_ptr);
             let next_block = &self.next_block(&block_ptr);
+            if next_block.is_null() {
+                return self.request_new_page();
+            }
             block_ptr.set(next_block);
         }
 
@@ -301,25 +315,23 @@ impl LinkedListAllocator {
             libc::mmap(
                 old_top as *mut c_void,
                 PAGE_SIZE,
-                PROT_WRITE,
-                MAP_SHARED,
-                MAP_FIXED,
+                PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                -1,
                 0,
             )
         };
-        if prog_brk.is_null() {
+        if prog_brk == MAP_FAILED {
             return HeaderPtr::null();
         }
-        assert_eq!(prog_brk.addr(), old_top + PAGE_SIZE);
+        assert_eq!(prog_brk.addr(), old_top);
 
         let _ = self
             .pages
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-        let top_ptr =
-            HeaderPtr(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE).cast::<Header>());
-
-        unsafe { top_ptr.cast::<Header>().write(Header::default()) }
+        let top_ptr = HeaderPtr::new(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE));
+        unsafe { top_ptr.write(Header::default()) }
 
         top_ptr
     }
