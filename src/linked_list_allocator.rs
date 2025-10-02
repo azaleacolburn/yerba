@@ -10,7 +10,7 @@ use core::{
 
 use libc::{
     __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
-    PROT_READ, PROT_WRITE,
+    PROT_READ, PROT_WRITE, arpd_request,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -44,6 +44,9 @@ struct HeaderPtr(*mut Header);
 
 impl HeaderPtr {
     pub fn new<T: ?Sized>(ptr: *mut T) -> Self {
+        if ptr.is_null() {
+            panic!("Tried to create HeaderPtr from null ptr, use HeaderPtr::null() instead")
+        }
         Self(ptr.cast::<Header>())
     }
     pub fn null() -> HeaderPtr {
@@ -162,120 +165,145 @@ impl LinkedListAllocator {
         }
     }
 
-    fn next_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
-        if block_ptr.size() == 0 {
+    fn next_header(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
+        if header_ptr.size() == 0 {
             unsafe {
-                block_ptr.write_bytes(0, 1);
+                header_ptr.write_bytes(0, 1);
             }
             return HeaderPtr::null();
         }
-        if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
+        if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
             > self.buf_ptr().addr() + PAGE_SIZE
         {
             return HeaderPtr::null();
         }
         unsafe {
-            block_ptr
-                .byte_add(block_ptr.get_offset() + block_ptr.size())
+            header_ptr
+                .byte_add(header_ptr.get_offset() + header_ptr.size())
                 .into()
         }
     }
 
-    fn next_empty_block(&self, block_ptr: &HeaderPtr) -> HeaderPtr {
-        if block_ptr.get_offset() + block_ptr.size() + block_ptr.addr()
-            > self.buf_ptr().addr() + PAGE_SIZE
+    // fn next_empty_block(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
+    //     if header_ptr.size() == 0 {
+    //         unsafe {
+    //             header_ptr.write_bytes(0, 1);
+    //         }
+    //         return HeaderPtr::null();
+    //     }
+    //     if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
+    //         > self.buf_ptr().addr() + PAGE_SIZE
+    //     {
+    //         return HeaderPtr::null();
+    //     }
+    //     unsafe {
+    //         let mut next: HeaderPtr = header_ptr
+    //             .byte_add(header_ptr.get_offset() + header_ptr.size())
+    //             .into();
+    //         if next.is_null() {
+    //             return HeaderPtr::null();
+    //         }
+    //         if next.used() {
+    //             next.set(&self.next_empty_block(&next));
+    //         }
+    //
+    //         next
+    //     }
+    // }
+
+    /// Gets the next block in the array, even if it's not initialized
+    /// Returns null if out of owned range
+    fn next_header_unchecked(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
+        let pages: usize = self.pages.load(std::sync::atomic::Ordering::Relaxed).into();
+        if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
+            > self.buf_ptr().addr() + PAGE_SIZE * pages
         {
             return HeaderPtr::null();
         }
         unsafe {
-            let mut next: HeaderPtr = block_ptr
-                .byte_add(block_ptr.get_offset() + block_ptr.size())
-                .into();
-            if next.is_null() {
-                return HeaderPtr::null();
-            }
-            if next.used() {
-                next.set(&self.next_empty_block(&next));
-            }
-
-            next
+            header_ptr
+                .byte_add(size_of::<Header>() + header_ptr.get_offset() + header_ptr.size())
+                .into()
         }
-    }
-
-    fn next_block_place(&self, block_ptr: &HeaderPtr, size: usize) -> HeaderPtr {
-        if block_ptr.get_offset() + size + block_ptr.addr() > self.buf_ptr().addr() + PAGE_SIZE {
-            return HeaderPtr::null();
-        }
-        unsafe { block_ptr.byte_add(block_ptr.get_offset() + size).into() }
     }
 
     fn find_empty_block(&self, size: usize, align: usize) -> HeaderPtr {
-        let mut last_block_ptr = HeaderPtr::null();
-        let mut block_ptr = self.first_block();
+        let mut last_header_ptr = HeaderPtr::null();
+        let mut header_ptr = self.first_block();
 
-        while !block_ptr.is_null() {
+        while !header_ptr.is_null() {
             unsafe {
-                if block_ptr.used() {
-                    last_block_ptr.set(&block_ptr);
-                    let next_block = &self.next_block(&block_ptr);
-                    block_ptr.set(next_block);
+                if header_ptr.used() {
+                    last_header_ptr.set(&header_ptr);
+                    let next_block = &self.next_header(&header_ptr);
+                    header_ptr.set(next_block);
 
                     continue;
                 }
 
                 // We don't actually use this pointer again, it's just for calculating the offset
-                let data_ptr = block_ptr.add(1).cast::<u8>();
+                let data_ptr = header_ptr.add(1).cast::<u8>();
                 let alignment_offset = data_ptr.align_offset(align);
                 if alignment_offset == usize::MAX {
                     return HeaderPtr::null();
                 }
 
                 let required_size = size + alignment_offset;
-                let fits = block_ptr.size() >= required_size;
+                let fits = header_ptr.size() >= required_size;
 
                 // We've found a block that fits
                 if fits {
-                    block_ptr.set_offset(alignment_offset);
+                    header_ptr.set_offset(alignment_offset);
 
                     break;
                 }
 
                 // We've found a pair of free blocks that can be merged to fit
-                let mergeable = !last_block_ptr.is_null() && !last_block_ptr.used();
+                let mergeable = !last_header_ptr.is_null() && !last_header_ptr.used();
                 if mergeable {
-                    let merged_size = block_ptr.size() + last_block_ptr.size();
+                    let merged_size = header_ptr.size() + last_header_ptr.size();
                     let fits_with_merge = merged_size >= required_size;
 
                     if fits_with_merge {
-                        let data_ptr = last_block_ptr.add(1);
+                        let data_ptr = last_header_ptr.add(1);
                         let alignment_offset = data_ptr.align_offset(align);
                         if alignment_offset == usize::MAX {
                             return HeaderPtr::null();
                         }
 
-                        last_block_ptr.set_offset(alignment_offset);
-                        last_block_ptr.add_size(
-                            block_ptr.size() + block_ptr.get_offset() + size_of::<Header>(),
+                        last_header_ptr.set_offset(alignment_offset);
+                        last_header_ptr.add_size(
+                            header_ptr.size() + header_ptr.get_offset() + size_of::<Header>(),
                         );
 
-                        block_ptr.write_bytes(0, size_of::<Header>());
-                        block_ptr = last_block_ptr;
+                        header_ptr.write_bytes(0, size_of::<Header>());
+                        header_ptr = last_header_ptr;
 
                         break;
                     }
                 }
-            }
 
-            last_block_ptr.set(&block_ptr);
-            let next_block = &self.next_block(&block_ptr);
-            // println!("{}", next_block.addr());
-            if next_block.is_null() {
-                return self.request_new_page();
+                last_header_ptr.set(&header_ptr);
+                let next_block = &self.next_header(&header_ptr);
+                // println!("{}", next_block.addr());
+                if next_block.is_null() {
+                    self.request_new_page();
+                    let header = Header::new(size, alignment_offset);
+                    let new_top_header = Header::new(
+                        PAGE_SIZE - size_of::<Header>() * 2 - alignment_offset - size,
+                        0,
+                    );
+                    let header_ptr =
+                        HeaderPtr::new(slice_from_raw_parts_mut(last_header_ptr.0, PAGE_SIZE));
+                    header_ptr.write(header);
+                    let top_header_ptr = self.next_header_unchecked(&header_ptr);
+                    top_header_ptr.write(new_top_header)
+                }
+                header_ptr.set(next_block);
             }
-            block_ptr.set(next_block);
         }
 
-        block_ptr
+        header_ptr
     }
 
     fn first_block(&self) -> HeaderPtr {
@@ -291,13 +319,10 @@ impl LinkedListAllocator {
     }
 
     /// Finds the block representing the given data pointer
-    fn find_ptr_block(&self, ptr: *const u8) -> HeaderPtr {
+    fn find_ptr_block(&self, ptr: *mut u8) -> HeaderPtr {
         let mut block = self.first_block();
-        unsafe {
-            while block.add(1).byte_add(block.get_offset()).addr() != ptr.addr() && !block.is_null()
-            {
-                block.set(&self.next_block(&block));
-            }
+        while block.get_data() != ptr && !block.is_null() {
+            block.set(&self.next_header(&block));
         }
 
         block
@@ -308,7 +333,7 @@ impl LinkedListAllocator {
         let mut head = self.first_block();
         while !head.is_null() {
             c += 1;
-            head.set(&self.next_block(&head));
+            head.set(&self.next_header(&head));
         }
 
         c
@@ -316,7 +341,7 @@ impl LinkedListAllocator {
 
     // Allocates a new page in memory and then returns the new top HeaderPtr
     // with provenance of PAGE_SIZE
-    fn request_new_page(&self) -> HeaderPtr {
+    fn request_new_page(&self) {
         let old_top = self.last_addr();
         let prog_brk = unsafe {
             libc::mmap(
@@ -329,18 +354,14 @@ impl LinkedListAllocator {
             )
         };
         if prog_brk == MAP_FAILED {
-            return HeaderPtr::null();
+            panic!("Failed to allocate new page");
+            // return HeaderPtr::null();
         }
         assert_eq!(prog_brk.addr(), old_top);
 
         let _ = self
             .pages
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-        let top_ptr = HeaderPtr::new(slice_from_raw_parts_mut(old_top as *mut u8, PAGE_SIZE));
-        unsafe { top_ptr.write(Header::default()) }
-
-        top_ptr
     }
 
     fn free_allocator(self) {
@@ -378,7 +399,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
 
         block.mark_used();
 
-        let block_next_ptr = self.next_block_place(&block, size);
+        let block_next_ptr = self.next_header_unchecked(&block);
 
         if block.size() > size_of::<Header>() + size
             && (block_next_ptr.addr() + size_of::<Header>()) < self.buf_ptr().addr() + PAGE_SIZE
@@ -412,10 +433,10 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         new_size: usize,
     ) -> *mut u8 {
         // First look forward for adjacent free blocks
-        let mut block_ptr = self.find_ptr_block(ptr);
-        block_ptr.free();
-        let mut frontier = self.next_block(&block_ptr);
-        let mut acc_size = block_ptr.size();
+        let mut header_ptr = self.find_ptr_block(ptr);
+        header_ptr.free();
+        let mut frontier = self.next_header(&header_ptr);
+        let mut acc_size = header_ptr.size();
         while acc_size < new_size && !frontier.is_null() {
             if frontier.used() {
                 break;
@@ -424,10 +445,10 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
 
             if acc_size >= new_size {
-                let alignment_offset = block_ptr.align_offset(layout.align());
+                let alignment_offset = header_ptr.align_offset(layout.align());
                 unsafe {
-                    block_ptr.set_offset(alignment_offset);
-                    return block_ptr.get_data().add(alignment_offset);
+                    header_ptr.set_offset(alignment_offset);
+                    return header_ptr.get_data().add(alignment_offset);
                 }
             }
             unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
@@ -439,7 +460,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let mut anchor = self.first_block();
         while !anchor.is_null() {
             if anchor.used() {
-                anchor.set(&self.next_block(&anchor));
+                anchor.set(&self.next_header(&anchor));
                 continue;
             }
 
@@ -447,7 +468,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             frontier.set(&anchor);
             while acc_size < new_size && !frontier.is_null() {
                 if frontier.used() {
-                    anchor.set(&self.next_block(&frontier));
+                    anchor.set(&self.next_header(&frontier));
                     assert!(!anchor.is_null());
                     break;
                 }
@@ -455,23 +476,21 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                 acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
 
                 if acc_size >= new_size {
-                    let alignment_offset = block_ptr.align_offset(layout.align());
+                    let alignment_offset = header_ptr.align_offset(layout.align());
                     unsafe {
-                        block_ptr.set_offset(alignment_offset);
-                        return block_ptr.get_data().add(alignment_offset);
+                        header_ptr.set_offset(alignment_offset);
+                        return header_ptr.get_data().add(alignment_offset);
                     }
                 }
                 unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
             }
         }
 
-        let header = self.request_new_page();
+        self.request_new_page();
+        frontier
         // Ideally they don't request more than a page
         while new_size > header.size() {
-            let top = self.request_new_page();
-            if top.is_null() {
-                return ptr::null_mut();
-            }
+            self.request_new_page();
             unsafe { top.write_bytes(0, size_of::<Header>()) };
         }
 
@@ -540,7 +559,12 @@ mod test {
 
         unsafe {
             let one = allocator.alloc(layout);
-            assert!(one.is_null());
+            assert!(!one.is_null());
+            allocator.dealloc(one, layout);
+
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
+            allocator.dealloc(two, layout);
         }
         allocator.free_allocator();
     }
