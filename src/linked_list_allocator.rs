@@ -214,8 +214,8 @@ impl LinkedListAllocator {
     /// Gets the next block in the array, even if it's not initialized
     /// Returns null if out of owned range
     fn next_header_unchecked(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
-        let pages: usize = self.pages.load(std::sync::atomic::Ordering::Relaxed).into();
-        if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
+        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        if header_ptr.addr() + header_ptr.get_offset() + header_ptr.size()
             > self.buf_ptr().addr() + PAGE_SIZE * pages
         {
             return HeaderPtr::null();
@@ -288,15 +288,22 @@ impl LinkedListAllocator {
                 // println!("{}", next_block.addr());
                 if next_block.is_null() {
                     self.request_new_page();
+
+                    let old_size = header_ptr.size();
+                    let remaining_size = self.last_addr()
+                        - size_of::<Header>() * 2
+                        - alignment_offset
+                        - size
+                        - self.buf_ptr().addr();
+
                     let header = Header::new(size, alignment_offset);
-                    let new_top_header = Header::new(
-                        PAGE_SIZE - size_of::<Header>() * 2 - alignment_offset - size,
-                        0,
-                    );
                     let header_ptr =
-                        HeaderPtr::new(slice_from_raw_parts_mut(last_header_ptr.0, PAGE_SIZE));
+                        HeaderPtr::new(slice_from_raw_parts_mut(last_header_ptr.0, size));
                     header_ptr.write(header);
+
+                    let new_top_header = Header::new(remaining_size, 0);
                     let top_header_ptr = self.next_header_unchecked(&header_ptr);
+                    println!("header: {}", top_header_ptr.addr());
                     top_header_ptr.write(new_top_header)
                 }
                 header_ptr.set(next_block);
@@ -311,7 +318,8 @@ impl LinkedListAllocator {
     }
 
     fn last_addr(&self) -> usize {
-        unsafe { self.buf_ptr().add(PAGE_SIZE).addr() }
+        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        unsafe { self.buf_ptr().add(PAGE_SIZE * pages).addr() }
     }
 
     fn buf_ptr(&self) -> *mut u8 {
@@ -362,6 +370,7 @@ impl LinkedListAllocator {
         let _ = self
             .pages
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed);
     }
 
     fn free_allocator(self) {
@@ -487,18 +496,18 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         }
 
         self.request_new_page();
-        frontier
+        let header_ptr = frontier;
         // Ideally they don't request more than a page
-        while new_size > header.size() {
+        while new_size > header_ptr.size() {
             self.request_new_page();
-            unsafe { top.write_bytes(0, size_of::<Header>()) };
+            unsafe { header_ptr.write_bytes(0, size_of::<Header>()) };
         }
 
-        let data_ptr = header.get_data();
+        let data_ptr = header_ptr.get_data();
         let alignment_offset = data_ptr.align_offset(layout.align());
         let data_ptr = unsafe { data_ptr.add(alignment_offset) };
 
-        if new_size + alignment_offset > header.size() {
+        if new_size + alignment_offset > header_ptr.size() {
             return ptr::null_mut();
         }
 
