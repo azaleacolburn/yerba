@@ -2,15 +2,14 @@ use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
     ffi::c_void,
-    fmt::Pointer,
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
 };
 
 use libc::{
-    __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE,
-    MAP_SHARED, PROT_READ, PROT_WRITE, arpd_request,
+    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE,
+    MAP_SHARED, PROT_READ, PROT_WRITE,
 };
 
 const PAGE_SIZE: usize = 4096;
