@@ -223,6 +223,35 @@ impl LinkedListAllocator {
         unsafe { header_ptr.next_unchecked() }
     }
 
+    /// Requests a new page to accommodate a new block headed by `header_ptr` of size `size`
+    /// # Args
+    /// - `header_ptr`: the header pointer to be ultimately returned
+    /// - `size`: the requested size of the block the header pointer will represent
+    /// - `alignment_offset`: the calculated offset to be added to
+    ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
+    ///     is of type `*mut T`
+    fn add_page(&self, header_ptr: &HeaderPtr, size: usize, alignment_offset: usize) {
+        self.request_new_page();
+
+        let remaining_size = self.last_addr()
+            - size_of::<Header>() * 2
+            - alignment_offset
+            - size
+            - self.buf_ptr().addr();
+
+        let header = Header::new(size, alignment_offset);
+        let header_ptr = HeaderPtr::new(slice_from_raw_parts_mut(header_ptr.0, size));
+        unsafe {
+            header_ptr.write(header);
+        }
+
+        let new_top_header = Header::new(remaining_size, 0);
+        let top_header_ptr = self.next_header(&header_ptr);
+        assert!(!top_header_ptr.is_null());
+        unsafe {
+            top_header_ptr.write(new_top_header);
+        }
+    }
     /// Gets the next block in the array, even if it's not initialized
     /// Returns null if out of owned range
 
@@ -272,23 +301,7 @@ impl LinkedListAllocator {
                 last_header_ptr.set(&header_ptr);
                 let next_block = &self.next_header(&header_ptr);
                 if next_block.is_null() {
-                    self.request_new_page();
-
-                    let remaining_size = self.last_addr()
-                        - size_of::<Header>() * 2
-                        - alignment_offset
-                        - size
-                        - self.buf_ptr().addr();
-
-                    let header = Header::new(size, alignment_offset);
-                    let header_ptr = HeaderPtr::new(slice_from_raw_parts_mut(header_ptr.0, size));
-                    header_ptr.write(header);
-
-                    let new_top_header = Header::new(remaining_size, 0);
-                    let top_header_ptr = self.next_header(&header_ptr);
-                    assert!(!top_header_ptr.is_null());
-                    top_header_ptr.write(new_top_header);
-
+                    self.add_page(&header_ptr, size, alignment_offset);
                     break;
                 }
                 header_ptr.set(next_block);
@@ -369,11 +382,22 @@ impl LinkedListAllocator {
             // }
         };
     }
+
+    fn can_split_allocated_block(
+        &self,
+        header: &HeaderPtr,
+        next_header: &HeaderPtr,
+        size: usize,
+    ) -> bool {
+        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        header.size() > size_of::<Header>() + size
+            && (next_header.addr() + size_of::<Header>())
+                < self.buf_ptr().addr() + PAGE_SIZE * pages
+    }
 }
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
         let size = layout.size();
         let align = layout.align();
         if align > MAX_ALIGN {
@@ -394,10 +418,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         header.mark_used();
 
         let next_header = unsafe { header.next_unchecked() };
-        if header.size() > size_of::<Header>() + size
-            && (next_header.addr() + size_of::<Header>())
-                < self.buf_ptr().addr() + PAGE_SIZE * pages
-        {
+        if self.can_split_allocated_block(&header, &next_header, size) {
             let new_block_size = header.size() - size_of::<Header>() - size;
             header.set_size(size);
             let new_header = Header {
@@ -437,7 +458,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             }
 
             acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
-
             if acc_size >= new_size {
                 let alignment_offset = header_ptr.align_offset(layout.align());
                 unsafe {
