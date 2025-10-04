@@ -9,8 +9,8 @@ use core::{
 };
 
 use libc::{
-    __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED,
-    PROT_READ, PROT_WRITE, arpd_request,
+    __errno_location, ENOMEM, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE,
+    MAP_SHARED, PROT_READ, PROT_WRITE, arpd_request,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -106,6 +106,10 @@ impl HeaderPtr {
         let offset = self.get_offset();
         unsafe { self.add(1).byte_add(offset).cast::<u8>() as *mut u8 }
     }
+
+    fn last_addr(&self) -> usize {
+        self.addr() + size_of::<Header>() + self.get_offset() + self.size()
+    }
 }
 
 impl Deref for HeaderPtr {
@@ -140,9 +144,8 @@ impl LinkedListAllocator {
         let head = Header::default();
 
         unsafe {
-            let old_break = libc::sbrk(0);
             let mem_ptr = libc::mmap(
-                old_break,
+                ptr::null_mut(),
                 PAGE_SIZE,
                 PROT_READ | PROT_WRITE,
                 MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
@@ -152,7 +155,6 @@ impl LinkedListAllocator {
             if mem_ptr == MAP_FAILED {
                 panic!("Failed to increment program break");
             }
-            assert_eq!(old_break, mem_ptr);
 
             let buf =
                 slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
@@ -172,9 +174,7 @@ impl LinkedListAllocator {
             }
             return HeaderPtr::null();
         }
-        if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
-            > self.buf_ptr().addr() + PAGE_SIZE
-        {
+        if header_ptr.last_addr() > self.last_addr() {
             return HeaderPtr::null();
         }
         unsafe {
@@ -215,9 +215,15 @@ impl LinkedListAllocator {
     /// Returns null if out of owned range
     fn next_header_unchecked(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
         let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
-        if header_ptr.addr() + header_ptr.get_offset() + header_ptr.size()
-            > self.buf_ptr().addr() + PAGE_SIZE * pages
-        {
+        println!(
+            "{pages} {} {} {}",
+            header_ptr.addr(),
+            self.buf_ptr().addr(),
+            header_ptr.size()
+        );
+        let t = header_ptr.last_addr() - self.last_addr();
+        println!("{t}");
+        if header_ptr.last_addr() > self.last_addr() {
             return HeaderPtr::null();
         }
         unsafe {
@@ -285,16 +291,16 @@ impl LinkedListAllocator {
 
                 last_header_ptr.set(&header_ptr);
                 let next_block = &self.next_header(&header_ptr);
-                // println!("{}", next_block.addr());
+                println!("next_block {}", next_block.addr());
                 if next_block.is_null() {
                     self.request_new_page();
 
-                    let old_size = header_ptr.size();
                     let remaining_size = self.last_addr()
                         - size_of::<Header>() * 2
                         - alignment_offset
                         - size
                         - self.buf_ptr().addr();
+                    println!("{remaining_size}");
 
                     let header = Header::new(size, alignment_offset);
                     let header_ptr =
@@ -307,6 +313,7 @@ impl LinkedListAllocator {
                     top_header_ptr.write(new_top_header)
                 }
                 header_ptr.set(next_block);
+                println!("Here")
             }
         }
 
@@ -350,10 +357,19 @@ impl LinkedListAllocator {
     // Allocates a new page in memory and then returns the new top HeaderPtr
     // with provenance of PAGE_SIZE
     fn request_new_page(&self) {
-        let old_top = self.last_addr();
+        let base_virtual_address = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                PAGE_SIZE * 10,
+                PROT_READ | PROT_WRITE,
+                MAP_NORESERVE | MAP_ANONYMOUS | MAP_SHARED,
+                -1,
+                0,
+            )
+        };
         let prog_brk = unsafe {
             libc::mmap(
-                old_top as *mut c_void,
+                base_virtual_address,
                 PAGE_SIZE,
                 PROT_READ | PROT_WRITE,
                 MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
@@ -363,14 +379,12 @@ impl LinkedListAllocator {
         };
         if prog_brk == MAP_FAILED {
             panic!("Failed to allocate new page");
-            // return HeaderPtr::null();
         }
-        assert_eq!(prog_brk.addr(), old_top);
+        assert_eq!(prog_brk, base_virtual_address);
 
         let _ = self
             .pages
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed);
     }
 
     fn free_allocator(self) {
