@@ -8,8 +8,8 @@ use core::{
 };
 
 use libc::{
-    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE,
-    MAP_SHARED, PROT_READ, PROT_WRITE,
+    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
+    PROT_WRITE,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -116,6 +116,34 @@ impl HeaderPtr {
                 .into()
         }
     }
+
+    fn merge_block(
+        &mut self,
+        last_header: &mut HeaderPtr,
+        required_size: usize,
+        align: usize,
+    ) -> bool {
+        let merged_size = self.size() + last_header.size();
+        let fits_with_merge = merged_size >= required_size;
+
+        if fits_with_merge {
+            let data_ptr = unsafe { last_header.add(1) };
+            let alignment_offset = data_ptr.align_offset(align);
+            if alignment_offset == usize::MAX {
+                return false;
+            }
+
+            last_header.set_offset(alignment_offset);
+            last_header.add_size(self.size() + self.get_offset() + size_of::<Header>());
+
+            unsafe {
+                self.write_bytes(0, size_of::<Header>());
+            }
+            self.set(&last_header);
+        }
+
+        true
+    }
 }
 
 impl Deref for HeaderPtr {
@@ -158,7 +186,9 @@ impl LinkedListAllocator {
                 -1,
                 0,
             );
-
+            if base_addr == MAP_FAILED {
+                panic!("Failed to reserve initial page array");
+            }
             let mem_ptr = libc::mmap(
                 base_addr,
                 PAGE_SIZE,
@@ -168,8 +198,9 @@ impl LinkedListAllocator {
                 0,
             );
             if mem_ptr == MAP_FAILED {
-                panic!("Failed to increment program break");
+                panic!("Failed to allocate first page");
             }
+            assert_eq!(mem_ptr, base_addr);
 
             let buf =
                 slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
@@ -191,33 +222,6 @@ impl LinkedListAllocator {
         }
         unsafe { header_ptr.next_unchecked() }
     }
-
-    // fn next_empty_block(&self, header_ptr: &HeaderPtr) -> HeaderPtr {
-    //     if header_ptr.size() == 0 {
-    //         unsafe {
-    //             header_ptr.write_bytes(0, 1);
-    //         }
-    //         return HeaderPtr::null();
-    //     }
-    //     if header_ptr.get_offset() + header_ptr.size() + header_ptr.addr()
-    //         > self.buf_ptr().addr() + PAGE_SIZE
-    //     {
-    //         return HeaderPtr::null();
-    //     }
-    //     unsafe {
-    //         let mut next: HeaderPtr = header_ptr
-    //             .byte_add(header_ptr.get_offset() + header_ptr.size())
-    //             .into();
-    //         if next.is_null() {
-    //             return HeaderPtr::null();
-    //         }
-    //         if next.used() {
-    //             next.set(&self.next_empty_block(&next));
-    //         }
-    //
-    //         next
-    //     }
-    // }
 
     /// Gets the next block in the array, even if it's not initialized
     /// Returns null if out of owned range
@@ -256,26 +260,13 @@ impl LinkedListAllocator {
                 // We've found a pair of free blocks that can be merged to fit
                 let mergeable = !last_header_ptr.is_null() && !last_header_ptr.used();
                 if mergeable {
-                    let merged_size = header_ptr.size() + last_header_ptr.size();
-                    let fits_with_merge = merged_size >= required_size;
-
-                    if fits_with_merge {
-                        let data_ptr = last_header_ptr.add(1);
-                        let alignment_offset = data_ptr.align_offset(align);
-                        if alignment_offset == usize::MAX {
-                            return HeaderPtr::null();
-                        }
-
-                        last_header_ptr.set_offset(alignment_offset);
-                        last_header_ptr.add_size(
-                            header_ptr.size() + header_ptr.get_offset() + size_of::<Header>(),
-                        );
-
-                        header_ptr.write_bytes(0, size_of::<Header>());
-                        header_ptr = last_header_ptr;
-
-                        break;
+                    let merge_failed =
+                        !header_ptr.merge_block(&mut last_header_ptr, required_size, align);
+                    if merge_failed {
+                        return HeaderPtr::null();
                     }
+
+                    break;
                 }
 
                 last_header_ptr.set(&header_ptr);
@@ -344,12 +335,13 @@ impl LinkedListAllocator {
     // Allocates a new page in memory and then returns the new top HeaderPtr
     // with provenance of PAGE_SIZE
     fn request_new_page(&self) {
-        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed);
+        let pages = self
+            .pages
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed) as usize
+            - 1;
+
         unsafe {
-            let base_addr = self
-                .buf_ptr()
-                .cast::<c_void>()
-                .byte_add(PAGE_SIZE * pages as usize);
+            let base_addr = self.buf_ptr().cast::<c_void>().byte_add(PAGE_SIZE * pages);
             let prog_brk = libc::mmap(
                 base_addr,
                 PAGE_SIZE,
@@ -364,10 +356,6 @@ impl LinkedListAllocator {
             }
             assert_eq!(prog_brk, base_addr);
         }
-
-        let _ = self
-            .pages
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn free_allocator(self) {
