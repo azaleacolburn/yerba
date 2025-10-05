@@ -1,3 +1,4 @@
+use core::alloc::Layout;
 use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
@@ -5,8 +6,9 @@ use core::{
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
+    sync::atomic::Ordering,
 };
-use std::alloc::Layout;
+use std::ptr::null_mut;
 
 use libc::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
@@ -328,7 +330,7 @@ impl LinkedListAllocator {
     }
 
     fn last_addr(&self) -> usize {
-        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let pages = self.pages.load(Ordering::Relaxed) as usize;
         unsafe { self.buf_ptr().add(PAGE_SIZE * pages).addr() }
     }
 
@@ -360,10 +362,7 @@ impl LinkedListAllocator {
     // Allocates a new page in memory and then returns the new top HeaderPtr
     // with provenance of PAGE_SIZE
     fn request_new_page(&self) {
-        let pages = self
-            .pages
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed) as usize
-            - 1;
+        let pages = self.pages.fetch_add(1, Ordering::Relaxed) as usize - 1;
 
         unsafe {
             let base_addr = self.buf_ptr().cast::<c_void>().byte_add(PAGE_SIZE * pages);
@@ -384,7 +383,7 @@ impl LinkedListAllocator {
     }
 
     fn free_allocator(self) {
-        let _pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        let _pages = self.pages.load(Ordering::Relaxed) as usize;
         unsafe {
             self.buf.cast::<u8>().write_bytes(0, MAX_BLOCK_SIZE);
             let success = libc::munmap(self.buf.cast::<c_void>(), MAX_BLOCK_SIZE);
@@ -420,7 +419,7 @@ impl LinkedListAllocator {
         next_header: &HeaderPtr,
         size: usize,
     ) -> bool {
-        let pages = self.pages.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let pages = self.pages.load(Ordering::Relaxed) as usize;
         header.size() > size_of::<Header>() + size
             && (next_header.addr() + size_of::<Header>())
                 < self.buf_ptr().addr() + PAGE_SIZE * pages
@@ -468,6 +467,9 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
         let mut block = self.find_ptr_block(ptr);
+        if block.is_null() {
+            return;
+        }
 
         block.free();
         block.set_offset(0);
