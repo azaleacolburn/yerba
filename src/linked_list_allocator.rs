@@ -6,6 +6,7 @@ use core::{
     ptr::{self, slice_from_raw_parts_mut},
     sync::atomic::AtomicU8,
 };
+use std::alloc::Layout;
 
 use libc::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
@@ -14,8 +15,9 @@ use libc::{
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
+const MAX_BLOCK_SIZE: usize = PAGE_SIZE * 12;
 const MAX_ALIGN: usize = 32;
-const MIN_ALIGN: usize = 2;
+const MIN_ALIGN: usize = 1;
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
@@ -144,6 +146,8 @@ impl HeaderPtr {
 
         true
     }
+
+    fn split_allocated_block(&self, next_header: &HeaderPtr, size: usize) {}
 }
 
 impl Deref for HeaderPtr {
@@ -180,7 +184,7 @@ impl LinkedListAllocator {
         unsafe {
             let base_addr = libc::mmap(
                 ptr::null_mut(),
-                PAGE_SIZE * 10,
+                PAGE_SIZE * 12,
                 PROT_READ | PROT_WRITE,
                 MAP_NORESERVE | MAP_ANONYMOUS | MAP_SHARED,
                 -1,
@@ -230,7 +234,11 @@ impl LinkedListAllocator {
     /// - `alignment_offset`: the calculated offset to be added to
     ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
     ///     is of type `*mut T`
+    /// # Safety
+    /// - Panics if header is null
+    /// - Panics if twelve or more pages have already been allocated (subject to change)
     fn add_page(&self, header_ptr: &HeaderPtr, size: usize, alignment_offset: usize) {
+        assert!(!header_ptr.is_null());
         self.request_new_page();
 
         let remaining_size = self.last_addr()
@@ -252,9 +260,13 @@ impl LinkedListAllocator {
             top_header_ptr.write(new_top_header);
         }
     }
-    /// Gets the next block in the array, even if it's not initialized
-    /// Returns null if out of owned range
 
+    /// Gets the next block in the array, even if it's not initialized
+    ///
+    /// # Returns
+    /// - The first empty header pointer that accomodates `size` in the allocator.
+    /// - A null pointer if unable to create an offset that aligns data pointer to `align`
+    ///
     fn find_empty_block(&self, size: usize, align: usize) -> HeaderPtr {
         let mut last_header_ptr = HeaderPtr::null();
         let mut header_ptr = self.first_block();
@@ -372,15 +384,34 @@ impl LinkedListAllocator {
     }
 
     fn free_allocator(self) {
-        let pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        let _pages = self.pages.load(core::sync::atomic::Ordering::Relaxed) as usize;
         unsafe {
-            self.buf.cast::<u8>().write_bytes(0, PAGE_SIZE * pages);
-            libc::munmap(self.buf.cast::<c_void>(), PAGE_SIZE * pages);
-            // libc::brk(self.buf.cast::<c_void>()); // .byte_sub(PAGE_SIZE * pages).cast::<c_void>()
-            // if *__errno_location() == ENOMEM {
-            //     panic!("Failed to increment program break");
-            // }
+            self.buf.cast::<u8>().write_bytes(0, MAX_BLOCK_SIZE);
+            let success = libc::munmap(self.buf.cast::<c_void>(), MAX_BLOCK_SIZE);
+            if success == -1 {
+                panic!("Failed to unmap allocator memory");
+            }
         };
+    }
+
+    /// Attempts to split the allocated block represented
+    /// by `header`, into two blocks
+    fn try_split_allocated_block(&self, header: &HeaderPtr, requested_size: usize) {
+        let next_header = unsafe { header.next_unchecked() };
+        if !self.can_split_allocated_block(&header, &next_header, requested_size) {
+            return;
+        }
+
+        let new_block_size = header.size() - size_of::<Header>() - requested_size;
+        header.set_size(requested_size);
+
+        let new_header = Header {
+            size: new_block_size,
+            offset: 0,
+        };
+        unsafe {
+            next_header.write(new_header);
+        }
     }
 
     fn can_split_allocated_block(
@@ -396,13 +427,26 @@ impl LinkedListAllocator {
     }
 }
 
+fn is_invalid_layout(&layout: &Layout) -> bool {
+    let align = layout.align();
+    let size = layout.size();
+    align > MAX_ALIGN
+        || align < MIN_ALIGN
+        || size < MIN_BLOCK_SIZE
+        || size + size_of::<Header>() > MAX_BLOCK_SIZE
+}
+
 unsafe impl GlobalAlloc for LinkedListAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let size = layout.size();
-        let align = layout.align();
-        if align > MAX_ALIGN {
+    /// Allocates a new block with capacity `size` in the allocator
+    /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
+    /// and a pointer to the first of the headers will be returned
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if is_invalid_layout(&layout) {
             return ptr::null_mut();
         }
+
+        let size = layout.size();
+        let align = layout.align();
 
         let mut header = self.find_empty_block(size, align);
         if header.is_null() {
@@ -417,19 +461,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         }
         header.mark_used();
 
-        let next_header = unsafe { header.next_unchecked() };
-        if self.can_split_allocated_block(&header, &next_header, size) {
-            let new_block_size = header.size() - size_of::<Header>() - size;
-            header.set_size(size);
-            let new_header = Header {
-                size: new_block_size,
-                offset: 0,
-            };
-
-            unsafe {
-                next_header.write(new_header);
-            }
-        }
+        self.try_split_allocated_block(&header, size);
 
         data_ptr
     }
@@ -576,9 +608,9 @@ mod test {
             assert!(!one.is_null());
             allocator.dealloc(one, layout);
 
-            // let two = allocator.alloc(layout);
-            // assert!(!two.is_null());
-            // allocator.dealloc(two, layout);
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
+            allocator.dealloc(two, layout);
         }
         allocator.free_allocator();
     }
