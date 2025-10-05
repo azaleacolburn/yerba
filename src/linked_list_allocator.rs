@@ -8,7 +8,6 @@ use core::{
     sync::atomic::AtomicU8,
     sync::atomic::Ordering,
 };
-use std::ptr::null_mut;
 
 use libc::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
@@ -148,8 +147,6 @@ impl HeaderPtr {
 
         true
     }
-
-    fn split_allocated_block(&self, next_header: &HeaderPtr, size: usize) {}
 }
 
 impl Deref for HeaderPtr {
@@ -169,7 +166,7 @@ impl From<*mut Header> for HeaderPtr {
 // Only allocates a single arena and returns a null pointer for allocations past that
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
 // Will merge empty blocks when necessary to fit new allocations
-struct LinkedListAllocator {
+pub struct LinkedListAllocator {
     buf: *mut UnsafeCell<[u8]>,
     pages: AtomicU8,
 }
@@ -382,17 +379,6 @@ impl LinkedListAllocator {
         }
     }
 
-    fn free_allocator(self) {
-        let _pages = self.pages.load(Ordering::Relaxed) as usize;
-        unsafe {
-            self.buf.cast::<u8>().write_bytes(0, MAX_BLOCK_SIZE);
-            let success = libc::munmap(self.buf.cast::<c_void>(), MAX_BLOCK_SIZE);
-            if success == -1 {
-                panic!("Failed to unmap allocator memory");
-            }
-        };
-    }
-
     /// Attempts to split the allocated block represented
     /// by `header`, into two blocks
     fn try_split_allocated_block(&self, header: &HeaderPtr, requested_size: usize) {
@@ -423,6 +409,25 @@ impl LinkedListAllocator {
         header.size() > size_of::<Header>() + size
             && (next_header.addr() + size_of::<Header>())
                 < self.buf_ptr().addr() + PAGE_SIZE * pages
+    }
+}
+
+impl Default for LinkedListAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for LinkedListAllocator {
+    fn drop(&mut self) {
+        let _pages = self.pages.load(Ordering::Relaxed) as usize;
+        unsafe {
+            self.buf.cast::<u8>().write_bytes(0, MAX_BLOCK_SIZE);
+            let success = libc::munmap(self.buf.cast::<c_void>(), MAX_BLOCK_SIZE);
+            if success == -1 {
+                panic!("Failed to unmap allocator memory");
+            }
+        };
     }
 }
 
@@ -596,8 +601,6 @@ mod test {
             allocator.dealloc(one, layout);
             allocator.dealloc(two, layout);
         }
-
-        allocator.free_allocator();
     }
 
     #[test]
@@ -614,7 +617,6 @@ mod test {
             assert!(!two.is_null());
             allocator.dealloc(two, layout);
         }
-        allocator.free_allocator();
     }
 
     #[test]
@@ -637,8 +639,6 @@ mod test {
             allocator.dealloc(two, layout);
             allocator.dealloc(one, layout);
         }
-
-        allocator.free_allocator();
     }
 
     #[test]
@@ -657,8 +657,6 @@ mod test {
             allocator.dealloc(one, layout);
             allocator.dealloc(two, Layout::new::<[u8; 32]>());
         }
-
-        allocator.free_allocator();
     }
 
     #[test]
@@ -675,7 +673,5 @@ mod test {
             let two = allocator.alloc(layout);
             assert!(!two.is_null());
         }
-
-        allocator.free_allocator();
     }
 }

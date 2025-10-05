@@ -46,6 +46,12 @@ impl StackAllocator {
     }
 }
 
+impl Default for StackAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 unsafe impl GlobalAlloc for StackAllocator {
     unsafe fn alloc(&self, layout: alloc::Layout) -> *mut u8 {
         let size = layout.size();

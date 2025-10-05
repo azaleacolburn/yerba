@@ -15,6 +15,19 @@ where
     fallback_allocator: F,
 }
 
+impl<A, F> FallbackAllocator<A, F>
+where
+    A: GlobalAlloc + Default,
+    F: GlobalAlloc + Default,
+{
+    fn new() -> Self {
+        Self {
+            main_allocator: A::default(),
+            fallback_allocator: F::default(),
+        }
+    }
+}
+
 unsafe impl<A, F> GlobalAlloc for FallbackAllocator<A, F>
 where
     A: GlobalAlloc,
@@ -73,6 +86,112 @@ where
             }
 
             data_ptr
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use core::alloc::Layout;
+
+    use crate::{linked_list_allocator::LinkedListAllocator, stack_allocator::StackAllocator};
+
+    use super::*;
+
+    #[test]
+    fn alloc_chunks() {
+        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let layout = Layout::new::<[u8; 16]>();
+
+        unsafe {
+            let chunk = allocator.alloc(layout);
+            assert!(!chunk.is_null());
+            allocator.dealloc(chunk, layout);
+
+            let one = allocator.alloc(layout);
+            assert!(!one.is_null());
+
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
+
+            let three = allocator.alloc(layout);
+            assert!(!three.is_null());
+
+            allocator.dealloc(three, layout);
+            allocator.dealloc(one, layout);
+            allocator.dealloc(two, layout);
+        }
+    }
+
+    #[test]
+    fn overflow() {
+        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let layout = Layout::new::<[u8; 5000]>();
+
+        unsafe {
+            let one = allocator.alloc(layout);
+            assert!(!one.is_null());
+            allocator.dealloc(one, layout);
+
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
+            allocator.dealloc(two, layout);
+        }
+    }
+
+    #[test]
+    fn zeroed() {
+        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let layout = Layout::new::<[u8; 16]>();
+
+        unsafe {
+            let one = allocator.alloc_zeroed(layout);
+            assert!(!one.is_null());
+
+            let two = allocator.alloc_zeroed(layout);
+            assert!(!two.is_null());
+
+            let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| *(one.wrapping_add(i))).sum();
+            assert_eq!(two_sum, 0);
+            assert_eq!(one_sum, 0);
+
+            allocator.dealloc(two, layout);
+            allocator.dealloc(one, layout);
+        }
+    }
+
+    #[test]
+    fn realloc() {
+        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let layout = Layout::new::<[u8; 16]>();
+
+        unsafe {
+            let one = allocator.alloc(layout);
+            assert!(!one.is_null());
+
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
+
+            allocator.realloc(two, layout, 32);
+            allocator.dealloc(one, layout);
+            allocator.dealloc(two, Layout::new::<[u8; 32]>());
+        }
+    }
+
+    #[test]
+    fn merge() {
+        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let layout = Layout::new::<[u8; 2000]>();
+
+        unsafe {
+            let one = allocator.alloc(layout);
+            assert!(!one.is_null());
+            allocator.dealloc(one, layout);
+
+            let layout = Layout::new::<[u8; 3080]>();
+            let two = allocator.alloc(layout);
+            assert!(!two.is_null());
         }
     }
 }
