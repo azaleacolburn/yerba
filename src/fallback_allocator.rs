@@ -1,4 +1,5 @@
 use core::alloc::GlobalAlloc;
+use std::panic;
 
 /// Holds an allocator of each given type
 /// When allocation, reallocation, or deallocation is done, it first calls one allocator, then the
@@ -106,6 +107,7 @@ mod test {
         unsafe {
             let chunk = allocator.alloc(layout);
             assert!(!chunk.is_null());
+            println!("here");
             allocator.dealloc(chunk, layout);
 
             let one = allocator.alloc(layout);

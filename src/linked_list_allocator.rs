@@ -220,7 +220,7 @@ impl LinkedListAllocator {
         if header_ptr.size() == 0 {
             panic!("Should not have zero sized headers")
         }
-        if header_ptr.last_addr() >= self.last_addr() {
+        if header_ptr.is_null() || header_ptr.last_addr() >= self.last_addr() {
             return HeaderPtr::null();
         }
         unsafe { header_ptr.next_unchecked() }
@@ -336,9 +336,10 @@ impl LinkedListAllocator {
     }
 
     /// Finds the block representing the given data pointer
+    /// If it does not exist, null is returned instead
     fn find_ptr_block(&self, ptr: *mut u8) -> HeaderPtr {
         let mut block = self.first_block();
-        while block.get_data() != ptr && !block.is_null() {
+        while !block.is_null() && block.get_data() != ptr {
             block.set(&self.next_header(&block));
         }
 

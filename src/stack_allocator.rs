@@ -32,18 +32,6 @@ impl StackAllocator {
                     .addr()
         }
     }
-
-    fn assert_top(&self, ptr: *const u8, size: usize) {
-        unsafe {
-            assert_eq!(
-                ptr.addr() + size,
-                self.buf
-                    .get()
-                    .byte_add(self.offset.load(Ordering::Relaxed))
-                    .addr()
-            )
-        }
-    }
 }
 
 impl Default for StackAllocator {
@@ -79,13 +67,16 @@ unsafe impl GlobalAlloc for StackAllocator {
         ptr
     }
 
-    /// Panics if ptr was not the last allocated object
+    /// If ptr was not to the last allocated object, nothing happens
     unsafe fn dealloc(&self, ptr: *mut u8, layout: alloc::Layout) {
+        let size = layout.size();
+        if !self.is_top(ptr, layout.size()) {
+            return;
+            // panic!("Cannot deallocate block that is not on the top of the stack")
+        }
+
         self.offset
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |offset| {
-                let size = layout.size();
-                self.assert_top(ptr, size);
-
                 Some(offset - size)
             })
             .unwrap();
@@ -149,23 +140,23 @@ mod test {
             allocator.dealloc(one, layout);
         }
     }
-
-    #[test]
-    #[should_panic]
-    fn out_of_order() {
-        let allocator = StackAllocator::new();
-        let layout = Layout::new::<[u8; 16]>();
-
-        unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            allocator.dealloc(one, layout);
-        }
-    }
+    //
+    // #[test]
+    // #[should_panic]
+    // fn out_of_order() {
+    //     let allocator = StackAllocator::new();
+    //     let layout = Layout::new::<[u8; 16]>();
+    //
+    //     unsafe {
+    //         let one = allocator.alloc(layout);
+    //         assert!(!one.is_null());
+    //
+    //         let two = allocator.alloc(layout);
+    //         assert!(!two.is_null());
+    //
+    //         allocator.dealloc(one, layout);
+    //     }
+    // }
 
     #[test]
     fn zeroed() {

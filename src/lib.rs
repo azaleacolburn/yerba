@@ -7,5 +7,4 @@
 pub mod fallback_allocator;
 pub mod linked_list_allocator;
 // pub mod page_allocator;
-pub mod freeable;
 pub mod stack_allocator;
