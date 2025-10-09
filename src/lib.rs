@@ -6,5 +6,5 @@
 // pub mod linear_allocator;
 pub mod fallback_allocator;
 pub mod linked_list_allocator;
-// pub mod page_allocator;
+pub mod page_allocator;
 pub mod stack_allocator;
