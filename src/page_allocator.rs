@@ -32,13 +32,14 @@ const DEFAULT_PAGE_SIZE: usize = 4096;
 ///
 /// Pages are not guaranteed to be contiguous with respect to each other
 /// The allocator will attempt to make them contiguous, however, if the allocation of a contiguous
-/// block with mmap(fixed)  
+/// block with mmap(fixed) fails, a new base of contiguous pages will be allocated
 ///
 ///
 pub struct PageAllocator {
     page_size: usize,
     page_count: AtomicUsize,
     base: *mut UnsafeCell<[u8]>,
+    block_ptrs: *mut [u8],
 }
 
 impl PageAllocator {
@@ -121,12 +122,26 @@ unsafe impl GlobalAlloc for PageAllocator {
                 -1,
                 0,
             )
-            .cast::<u8>()
         };
+        if ptr == MAP_FAILED {
+            let ptr = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    self.page_size,
+                    PROT_READ | PROT_WRITE,
+                    MAP_ANONYMOUS | MAP_PRIVATE,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == MAP_FAILED {
+                return ptr::null_mut();
+            }
+        }
         self.page_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        ptr
+        ptr.cast::<u8>()
     }
 
     unsafe fn alloc_zeroed(&self, layout: alloc::Layout) -> *mut u8 {
