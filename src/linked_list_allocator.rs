@@ -181,6 +181,33 @@ impl LinkedListAllocator {
         let head = Header::default();
 
         unsafe {
+            let base_addr = libc::mmap(
+                ptr::null_mut(),
+                PAGE_SIZE * 12,
+                PROT_READ | PROT_WRITE,
+                MAP_NORESERVE | MAP_ANONYMOUS | MAP_SHARED,
+                -1,
+                0,
+            );
+            if base_addr == MAP_FAILED {
+                panic!("Failed to reserve initial page array");
+            }
+            let mem_ptr = libc::mmap(
+                base_addr,
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                -1,
+                0,
+            );
+            if mem_ptr == MAP_FAILED {
+                panic!("Failed to allocate first page");
+            }
+            assert_eq!(mem_ptr, base_addr);
+
+            let buf =
+                slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+
             buf.cast::<Header>().write(head);
 
             Self {

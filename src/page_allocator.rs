@@ -2,7 +2,6 @@ use core::alloc::{self, AllocError, GlobalAlloc, Layout};
 use core::cmp::{self, max};
 use core::ffi::{self, c_void};
 use core::ptr::{self, NonNull, null, null_mut};
-use lazy_static::lazy_static;
 use libc::{
     self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
     PROT_WRITE, mmap, munmap, sbrk,
@@ -144,7 +143,7 @@ impl PageAllocator {
     }
 
     fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
-        slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_count()) as *mut Page
+        slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
     }
 }
 
@@ -154,6 +153,8 @@ impl Default for PageAllocator {
     }
 }
 
+// Decide if implementing GlobalAlloc is the right solution for the page allocation system (I vote
+// no)
 unsafe impl GlobalAlloc for PageAllocator {
     unsafe fn alloc(&self, _layout: alloc::Layout) -> *mut u8 {
         let page_array_count = self.page_array_count();
