@@ -134,7 +134,26 @@ impl PageAllocator for YerbaPageAllocator {
             }
         }
     }
-    unsafe fn request_page(&self) -> *mut u8 {
+
+    fn page_array_count(&self) -> usize {
+        self.page_array_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .into()
+    }
+
+    fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
+        slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
+    }
+}
+
+impl Default for PageAllocator {
+    fn default() -> Self {
+        Self::new(DEFAULT_PAGE_SIZE)
+    }
+}
+
+unsafe impl GlobalAlloc for PageAllocator {
+    unsafe fn alloc(&self, _layout: alloc::Layout) -> *mut u8 {
         let page_array_count = self.page_array_count();
         assert_eq!(page_array_count, 1); // testing
 
