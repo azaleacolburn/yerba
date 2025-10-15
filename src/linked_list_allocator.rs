@@ -9,10 +9,10 @@ use core::{
     sync::atomic::Ordering,
 };
 
-use libc::{
-    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED, PROT_READ,
-    PROT_WRITE,
-};
+use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+
+use crate::page_allocator::YerbaPageAllocator;
+use crate::page_allocator_trait::PageAllocator;
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -166,12 +166,13 @@ impl From<*mut Header> for HeaderPtr {
 // Only allocates a single arena and returns a null pointer for allocations past that
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
 // Will merge empty blocks when necessary to fit new allocations
-pub struct LinkedListAllocator {
+pub struct LinkedListAllocator<A: PageAllocator = YerbaPageAllocator> {
     buf: *mut UnsafeCell<[u8]>,
     pages: AtomicU8,
+    page_allocator: A,
 }
 
-impl LinkedListAllocator {
+impl<A: PageAllocator> LinkedListAllocator<A> {
     pub fn new() -> Self {
         const {
             let header_size = size_of::<Header>();
@@ -180,40 +181,24 @@ impl LinkedListAllocator {
         }
         let head = Header::default();
 
+        let page_allocator = A::new(PAGE_SIZE);
+
+        let first_page_ptr = unsafe { page_allocator.request_page_zeroed() };
+        if first_page_ptr.is_null() {
+            panic!("Failed to allocate the first page");
+        }
+
+        let first_page_buf =
+            slice_from_raw_parts_mut(first_page_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+
         unsafe {
-            let base_addr = libc::mmap(
-                ptr::null_mut(),
-                PAGE_SIZE * 12,
-                PROT_READ | PROT_WRITE,
-                MAP_NORESERVE | MAP_ANONYMOUS | MAP_SHARED,
-                -1,
-                0,
-            );
-            if base_addr == MAP_FAILED {
-                panic!("Failed to reserve initial page array");
-            }
-            let mem_ptr = libc::mmap(
-                base_addr,
-                PAGE_SIZE,
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-                -1,
-                0,
-            );
-            if mem_ptr == MAP_FAILED {
-                panic!("Failed to allocate first page");
-            }
-            assert_eq!(mem_ptr, base_addr);
+            first_page_buf.cast::<Header>().write(head);
+        }
 
-            let buf =
-                slice_from_raw_parts_mut(mem_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
-
-            buf.cast::<Header>().write(head);
-
-            Self {
-                buf,
-                pages: AtomicU8::new(1),
-            }
+        Self {
+            buf: first_page_buf,
+            pages: AtomicU8::new(1),
+            page_allocator,
         }
     }
 
@@ -420,7 +405,7 @@ impl Default for LinkedListAllocator {
     }
 }
 
-impl Drop for LinkedListAllocator {
+impl<A: PageAllocator> Drop for LinkedListAllocator<A> {
     fn drop(&mut self) {
         let _pages = self.pages.load(Ordering::Relaxed) as usize;
         unsafe {
