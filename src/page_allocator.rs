@@ -1,14 +1,12 @@
+use crate::page_allocator_trait::PageAllocator;
 use core::ffi::c_void;
 use core::ptr::{self};
 use libc::{
-    self, __errno_location, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_NORESERVE, MAP_PRIVATE,
-    MAP_SHARED, PROT_READ, PROT_WRITE, munmap,
+    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE, munmap,
 };
 use std::cell::UnsafeCell;
 use std::ptr::slice_from_raw_parts_mut;
 use std::sync::atomic::{AtomicU8, AtomicUsize};
-
-use crate::page_allocator_trait::PageAllocator;
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -47,9 +45,9 @@ struct PageArray {
 impl PageArray {
     fn last_addr(&self, page_size: usize) -> *mut c_void {
         unsafe {
-            let first_page_ptr = self.pages.cast::<*mut Page>().read();
-            first_page_ptr
-                .byte_add(page_size * self.page_count())
+            let first_page_array_ptr = self.pages.cast::<*mut Page>().read();
+            first_page_array_ptr
+                .byte_add(page_size * self.page_count() - 1)
                 .cast()
         }
     }
@@ -135,25 +133,7 @@ impl PageAllocator for YerbaPageAllocator {
         }
     }
 
-    fn page_array_count(&self) -> usize {
-        self.page_array_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .into()
-    }
-
-    fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
-        slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
-    }
-}
-
-impl Default for PageAllocator {
-    fn default() -> Self {
-        Self::new(DEFAULT_PAGE_SIZE)
-    }
-}
-
-unsafe impl GlobalAlloc for PageAllocator {
-    unsafe fn alloc(&self, _layout: alloc::Layout) -> *mut u8 {
+    unsafe fn request_page(&self) -> *mut u8 {
         let page_array_count = self.page_array_count();
         assert_eq!(page_array_count, 1); // testing
 
@@ -176,7 +156,7 @@ unsafe impl GlobalAlloc for PageAllocator {
         };
 
         if page == MAP_FAILED {
-            println!("here");
+            println!("failed to allocator page");
             let base_page = unsafe {
                 libc::mmap(
                     ptr::null_mut(),
@@ -233,6 +213,12 @@ unsafe impl GlobalAlloc for PageAllocator {
     }
 }
 
+impl Default for YerbaPageAllocator {
+    fn default() -> Self {
+        Self::new(DEFAULT_PAGE_SIZE)
+    }
+}
+
 impl YerbaPageAllocator {
     fn page_array_count(&self) -> usize {
         self.page_array_count
@@ -242,11 +228,5 @@ impl YerbaPageAllocator {
 
     fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
         slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
-    }
-}
-
-impl Default for YerbaPageAllocator {
-    fn default() -> Self {
-        Self::new(DEFAULT_PAGE_SIZE)
     }
 }

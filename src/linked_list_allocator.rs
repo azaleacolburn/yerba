@@ -561,9 +561,8 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
 
 #[cfg(test)]
 mod test {
-    use core::alloc::Layout;
-
     use super::*;
+    use core::alloc::Layout;
 
     #[test]
     fn alloc_chunks() {
