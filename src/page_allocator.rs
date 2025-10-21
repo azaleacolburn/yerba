@@ -45,8 +45,9 @@ struct PageArray {
 impl PageArray {
     fn last_addr(&self, page_size: usize) -> *mut c_void {
         unsafe {
-            let first_page_array_ptr = self.pages.cast::<*mut Page>().read();
-            first_page_array_ptr
+            let first_page_ptr = self.pages.cast::<*mut Page>();
+            println!("{:?}", first_page_ptr);
+            first_page_ptr
                 .byte_add(page_size * self.page_count() - 1)
                 .cast()
         }
@@ -68,39 +69,58 @@ impl PageArray {
     }
 }
 
+fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
+    let ptr = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            size,
+            PROT_READ | PROT_WRITE,
+            MAP_ANONYMOUS | MAP_PRIVATE,
+            -1,
+            0,
+        )
+    };
+
+    if ptr == MAP_FAILED {
+        return Err(());
+    };
+
+    Ok(ptr)
+}
+
+fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
+    let ptr = unsafe {
+        libc::mmap(
+            base.cast(),
+            size,
+            PROT_READ | PROT_WRITE,
+            MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if ptr == MAP_FAILED {
+        return Err(());
+    };
+
+    Ok(ptr)
+}
+
 impl PageAllocator for YerbaPageAllocator {
     fn new(page_size: usize) -> Self {
         unsafe {
             // Create the underlying block for storing pointers to arrays of blocks and the sizes
             // of those arrays
             // This will be of type `*mut [PageArray]`
-            let page_ptr_ptr = libc::mmap(
-                ptr::null_mut(),
-                12, // Arbitrary, means 12*12 pages can be allocated
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE,
-                -1,
-                0,
-            );
-            if page_ptr_ptr == MAP_FAILED {
-                panic!("Failed to reserve the underlying pointer array")
-            }
+            let page_ptr_ptr = map_arbitrary(size_of::<PageArray>() * 12)
+                .expect("Failed to reserve the underlying pointer array");
             let underlying_ptr_array =
                 slice_from_raw_parts_mut(page_ptr_ptr as *mut u8, page_size) as *mut [PageArray];
 
             // The first pointer to the array of page pointers (PageArray)
             // This will be of type `*mut Page`
-            let base_page_ptr = libc::mmap(
-                ptr::null_mut(),
-                page_size * 12,
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE,
-                -1,
-                0,
-            );
-            if base_page_ptr == MAP_FAILED {
-                panic!("Failed to reserve initial page array");
-            }
+            let base_page_ptr =
+                map_arbitrary(page_size * 12).expect("Failed to reserve initial page array");
 
             let initial_page_array = PageArray {
                 // This is to establish provenance on our `UnsafeCell<[u8]>`
@@ -112,17 +132,8 @@ impl PageAllocator for YerbaPageAllocator {
                 .cast::<PageArray>()
                 .write(initial_page_array);
 
-            let first_block_ptr = libc::mmap(
-                base_page_ptr,
-                page_size,
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-                -1,
-                0,
-            );
-            if first_block_ptr == MAP_FAILED {
-                panic!("Failed to allocate first page");
-            }
+            let first_block_ptr =
+                map_fixed(base_page_ptr, page_size).expect("Failed to allocate first page");
             assert_eq!(first_block_ptr, base_page_ptr);
 
             YerbaPageAllocator {
@@ -143,55 +154,45 @@ impl PageAllocator for YerbaPageAllocator {
 
         let curr_page_array = unsafe { curr_page_array_ptr.read() };
         let last_page_addr = curr_page_array.last_addr(self.page_size);
+        println!("last page adrr: {:?}", last_page_addr);
 
-        let page = unsafe {
-            libc::mmap(
-                last_page_addr,
-                self.page_size,
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-                -1,
-                0,
-            )
-        };
-
-        if page == MAP_FAILED {
-            println!("failed to allocator page");
-            let base_page = unsafe {
-                libc::mmap(
-                    ptr::null_mut(),
-                    self.page_size,
-                    PROT_READ | PROT_WRITE,
-                    MAP_ANONYMOUS | MAP_PRIVATE,
-                    -1,
-                    0,
-                )
-            };
-            if base_page == MAP_FAILED {
-                return ptr::null_mut();
-            }
-            let new_page_array = PageArray {
-                pages: self.to_page_ptr(base_page),
-                page_count: AtomicUsize::from(1),
-            };
-            unsafe {
-                // Write the address of the new base page array to the page array buffer
-                // Remeber that this extra layer of indirection is necessary for keeping pages
-                // contiguous whenever possible
-                self.page_block_ptr_array
-                    .cast::<PageArray>()
-                    .add(page_array_count)
-                    .write(new_page_array)
-            }
-        } else {
-            unsafe {
+        match map_fixed(last_page_addr, self.page_size) {
+            Ok(page_ptr) => unsafe {
                 (*curr_page_array_ptr)
                     .page_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                page_ptr.cast()
+            },
+
+            Err(_) => {
+                println!("failed to allocate page");
+                let new_base_page = match map_arbitrary(self.page_size) {
+                    Ok(ptr) => ptr,
+                    Err(_) => return ptr::null_mut(),
+                };
+                // `new_base_page` seems to be a lower value than `last_page_addr`
+                // which is bad I think
+                println!("{:?}", new_base_page);
+                let new_page_array = PageArray {
+                    pages: self.to_page_ptr(new_base_page),
+                    page_count: AtomicUsize::from(1),
+                };
+                let page_ptr = new_page_array.pages.cast();
+
+                unsafe {
+                    // Write the address of the new base page array to the page array buffer
+                    // Remeber that this extra layer of indirection is necessary for keeping pages
+                    // contiguous whenever possible
+                    self.page_block_ptr_array
+                        .cast::<PageArray>()
+                        .add(page_array_count)
+                        .write(new_page_array)
+                };
+
+                page_ptr
             }
         }
-
-        page.cast::<u8>()
     }
 
     unsafe fn request_page_zeroed(&self) -> *mut u8 {
@@ -216,6 +217,28 @@ impl PageAllocator for YerbaPageAllocator {
 impl Default for YerbaPageAllocator {
     fn default() -> Self {
         Self::new(DEFAULT_PAGE_SIZE)
+    }
+}
+
+impl Drop for YerbaPageAllocator {
+    fn drop(&mut self) {
+        let page_array_count = self.page_array_count();
+        let page_blocks = self.page_block_ptr_array.cast::<PageArray>();
+        for i in 0..page_array_count {
+            let page_array = unsafe { page_blocks.wrapping_add(i).read() };
+            unsafe {
+                libc::munmap(
+                    page_array.pages.cast(),
+                    self.page_size * page_array.page_count(),
+                )
+            };
+        }
+        unsafe {
+            libc::munmap(
+                self.page_block_ptr_array.cast(),
+                size_of::<PageArray>() * 12,
+            )
+        };
     }
 }
 
