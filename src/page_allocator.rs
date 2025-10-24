@@ -46,7 +46,6 @@ impl PageArray {
     fn last_addr(&self, page_size: usize) -> *mut c_void {
         unsafe {
             let first_page_ptr = self.pages.cast::<*mut Page>();
-            println!("{:?}", first_page_ptr);
             first_page_ptr
                 .byte_add(page_size * self.page_count() - 1)
                 .cast()
@@ -154,7 +153,6 @@ impl PageAllocator for YerbaPageAllocator {
 
         let curr_page_array = unsafe { curr_page_array_ptr.read() };
         let last_page_addr = curr_page_array.last_addr(self.page_size);
-        println!("last page adrr: {:?}", last_page_addr);
 
         match map_fixed(last_page_addr, self.page_size) {
             Ok(page_ptr) => unsafe {
@@ -173,7 +171,6 @@ impl PageAllocator for YerbaPageAllocator {
                 };
                 // `new_base_page` seems to be a lower value than `last_page_addr`
                 // which is bad I think
-                println!("{:?}", new_base_page);
                 let new_page_array = PageArray {
                     pages: self.to_page_ptr(new_base_page),
                     page_count: AtomicUsize::from(1),
@@ -210,6 +207,28 @@ impl PageAllocator for YerbaPageAllocator {
     unsafe fn relinquish_page(&self, ptr: *mut u8) {
         // TODO Figure out how to effectively clear the pointer to this underlying data in our
         // pointer array
+
+        // Iterate over the page arrays and find which one holds the deallocated pointer
+        for i in 0..self.page_array_count() {
+            let page_array = unsafe {
+                self.page_block_ptr_array
+                    .cast::<PageArray>()
+                    .wrapping_add(i)
+                    .read()
+            };
+            let page_count = page_array.page_count();
+            let lower = page_array.pages.addr();
+            let upper = lower + page_count * self.page_size;
+            if ptr.addr() > lower && ptr.addr() < upper {
+                // This is an atomic number so we can edit it through
+                // our stack version of page_array in stack memory
+                // even though we couldn't edit values of page_array on the heap
+                // using it
+                if page_count != 1 {
+                    page_array.set_page_count(page_count - 1);
+                }
+            }
+        }
         unsafe { munmap(ptr.cast::<c_void>(), self.page_size) };
     }
 }

@@ -1,5 +1,4 @@
 use core::alloc::GlobalAlloc;
-use std::panic;
 
 /// Holds an allocator of each given type
 /// When allocation, reallocation, or deallocation is done, it first calls one allocator, then the
