@@ -39,7 +39,8 @@ struct PageArray {
     // If `pages` where of type `*mut [Page]`, we would also have to store the page_size as the
     // wide pointer's provenance, which we're already storing in `PageAllocator`, our parent struct
     pages: *mut Page,
-    page_count: AtomicUsize,
+    pages_loaned: AtomicUsize,
+    pages_allocated: AtomicUsize,
 }
 
 impl PageArray {
@@ -47,24 +48,38 @@ impl PageArray {
         unsafe {
             let first_page_ptr = self.pages.cast::<*mut Page>();
             first_page_ptr
-                .byte_add(page_size * self.page_count() - 1)
+                .byte_add(page_size * self.page_capacity() - 1)
                 .cast()
         }
     }
 
-    fn page_count(&self) -> usize {
-        self.page_count.load(std::sync::atomic::Ordering::Relaxed)
+    fn page_capacity(&self) -> usize {
+        self.pages_allocated
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn pages_loaned(&self) -> usize {
+        self.pages_loaned.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn set_page_count(&self, n: impl Into<usize>) -> usize {
+    fn set_loaned_page_count(&self, n: impl Into<usize>) -> usize {
         let n = n.into();
-        self.page_count
+        self.pages_allocated
             .fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |_| Some(n),
             )
             .unwrap()
+    }
+
+    fn decrement_loaned_page_count(&self) {
+        self.pages_allocated
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn increment_allocated_page_count(&self) -> usize {
+        self.pages_allocated
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -125,7 +140,8 @@ impl PageAllocator for YerbaPageAllocator {
                 // This is to establish provenance on our `UnsafeCell<[u8]>`
                 // In the future we might not do it this way
                 pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
-                page_count: AtomicUsize::from(1),
+                pages_allocated: AtomicUsize::from(1),
+                pages_loaned: AtomicUsize::from(0),
             };
             underlying_ptr_array
                 .cast::<PageArray>()
@@ -153,11 +169,19 @@ impl PageAllocator for YerbaPageAllocator {
 
         let curr_page_array = unsafe { curr_page_array_ptr.read() };
         let last_page_addr = curr_page_array.last_addr(self.page_size);
+        if curr_page_array.page_capacity() > curr_page_array.pages_loaned() {
+            return curr_page_array
+                .pages
+                .wrapping_byte_add(size_of::<PageArray>() * curr_page_array.pages_loaned())
+                .cast();
+        }
+        println!("last page addr {:?}", last_page_addr);
+        println!("page_count {:?}", curr_page_array.page_capacity());
 
         match map_fixed(last_page_addr, self.page_size) {
             Ok(page_ptr) => unsafe {
                 (*curr_page_array_ptr)
-                    .page_count
+                    .pages_allocated
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 page_ptr.cast()
@@ -173,7 +197,8 @@ impl PageAllocator for YerbaPageAllocator {
                 // which is bad I think
                 let new_page_array = PageArray {
                     pages: self.to_page_ptr(new_base_page),
-                    page_count: AtomicUsize::from(1),
+                    pages_allocated: AtomicUsize::from(1),
+                    pages_loaned: AtomicUsize::from(0),
                 };
                 let page_ptr = new_page_array.pages.cast();
 
@@ -205,9 +230,10 @@ impl PageAllocator for YerbaPageAllocator {
     }
 
     unsafe fn relinquish_page(&self, ptr: *mut u8) {
+        assert!(!ptr.is_null());
+
         // TODO Figure out how to effectively clear the pointer to this underlying data in our
         // pointer array
-
         // Iterate over the page arrays and find which one holds the deallocated pointer
         for i in 0..self.page_array_count() {
             let page_array = unsafe {
@@ -216,7 +242,7 @@ impl PageAllocator for YerbaPageAllocator {
                     .wrapping_add(i)
                     .read()
             };
-            let page_count = page_array.page_count();
+            let page_count = page_array.page_capacity();
             let lower = page_array.pages.addr();
             let upper = lower + page_count * self.page_size;
             if ptr.addr() > lower && ptr.addr() < upper {
@@ -224,12 +250,12 @@ impl PageAllocator for YerbaPageAllocator {
                 // our stack version of page_array in stack memory
                 // even though we couldn't edit values of page_array on the heap
                 // using it
-                if page_count != 1 {
-                    page_array.set_page_count(page_count - 1);
+                page_array.decrement_loaned_page_count();
+                unsafe {
+                    ptr.write_bytes(0, self.page_size);
                 }
             }
         }
-        unsafe { munmap(ptr.cast::<c_void>(), self.page_size) };
     }
 }
 
@@ -248,7 +274,7 @@ impl Drop for YerbaPageAllocator {
             unsafe {
                 libc::munmap(
                     page_array.pages.cast(),
-                    self.page_size * page_array.page_count(),
+                    self.page_size * page_array.page_capacity(),
                 )
             };
         }
