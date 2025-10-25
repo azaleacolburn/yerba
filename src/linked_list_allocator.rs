@@ -8,6 +8,7 @@ use core::{
     sync::atomic::AtomicU8,
     sync::atomic::Ordering,
 };
+use std::marker::PhantomData;
 
 use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
@@ -166,13 +167,17 @@ impl From<*mut Header> for HeaderPtr {
 // Only allocates a single arena and returns a null pointer for allocations past that
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
 // Will merge empty blocks when necessary to fit new allocations
-pub struct LinkedListAllocator<A: PageAllocator = YerbaPageAllocator> {
+pub struct LinkedListAllocator<'a, A = YerbaPageAllocator<'a>>
+where
+    A: PageAllocator,
+{
     buf: *mut UnsafeCell<[u8]>,
     pages: AtomicU8,
     page_allocator: A,
+    phantom: PhantomData<&'a ()>,
 }
 
-impl<A: PageAllocator> LinkedListAllocator<A> {
+impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
     pub fn new() -> Self {
         const {
             let header_size = size_of::<Header>();
@@ -181,7 +186,7 @@ impl<A: PageAllocator> LinkedListAllocator<A> {
         }
         let head = Header::default();
 
-        let page_allocator = A::new(PAGE_SIZE);
+        let mut page_allocator = A::new(PAGE_SIZE);
 
         let first_page_ptr = unsafe { page_allocator.request_page_zeroed() };
         if first_page_ptr.is_null() {
@@ -199,6 +204,7 @@ impl<A: PageAllocator> LinkedListAllocator<A> {
             buf: first_page_buf,
             pages: AtomicU8::new(1),
             page_allocator,
+            phantom: PhantomData,
         }
     }
 
@@ -399,13 +405,13 @@ impl<A: PageAllocator> LinkedListAllocator<A> {
     }
 }
 
-impl Default for LinkedListAllocator {
+impl<'a> Default for LinkedListAllocator<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: PageAllocator> Drop for LinkedListAllocator<A> {
+impl<'a, A: PageAllocator> Drop for LinkedListAllocator<'a, A> {
     fn drop(&mut self) {
         let _pages = self.pages.load(Ordering::Relaxed) as usize;
         unsafe {
@@ -427,7 +433,7 @@ fn is_invalid_layout(&layout: &Layout) -> bool {
         || size + size_of::<Header>() > MAX_BLOCK_SIZE
 }
 
-unsafe impl GlobalAlloc for LinkedListAllocator {
+unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
     /// Allocates a new block with capacity `size` in the allocator
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
     /// and a pointer to the first of the headers will be returned
