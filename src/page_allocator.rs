@@ -4,7 +4,6 @@ use core::ptr::{self};
 use libc::{self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::cell::UnsafeCell;
 use std::ptr::slice_from_raw_parts_mut;
-use std::sync::atomic::AtomicU8;
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -20,12 +19,10 @@ type Page = UnsafeCell<[u8]>;
 /// Pages are not guaranteed to be contiguous with respect to each other
 /// The allocator will attempt to make them contiguous, however, if the allocation of a contiguous
 /// block with mmap(fixed) fails, a new base of contiguous pages will be allocated
-///
-///
 pub struct YerbaPageAllocator<'a> {
     page_size: usize,
     // Represents the number of page_arrays we've allocated
-    page_array_count: AtomicU8,
+    page_array_count: u8,
     page_array_buffer: &'a mut [PageArray],
 }
 
@@ -101,6 +98,12 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
     Ok(ptr)
 }
 
+impl<'a> YerbaPageAllocator<'a> {
+    fn current_page_array(&mut self) -> &mut PageArray {
+        &mut self.page_array_buffer[self.page_array_count as usize - 1]
+    }
+}
+
 impl<'a> PageAllocator for YerbaPageAllocator<'a> {
     fn new(page_size: usize) -> Self {
         unsafe {
@@ -133,19 +136,20 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
 
             YerbaPageAllocator {
                 page_size,
-                page_array_count: AtomicU8::from(1),
+                page_array_count: 1,
                 page_array_buffer: underlying_ptr_array,
             }
         }
     }
 
     unsafe fn request_page(&mut self) -> *mut u8 {
-        let page_array_count = self.page_array_count();
+        let page_array_count = self.page_array_count;
         assert!(page_array_count < 12);
 
-        let curr_page_array = &mut self.page_array_buffer[page_array_count - 1];
+        let page_size = self.page_size;
+        let curr_page_array = self.current_page_array();
 
-        let last_page_addr = curr_page_array.last_addr(self.page_size);
+        let last_page_addr = curr_page_array.last_addr(page_size);
         if curr_page_array.pages_allocated > curr_page_array.pages_loaned {
             return curr_page_array
                 .pages
@@ -155,7 +159,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
         println!("last page addr {:?}", last_page_addr);
         println!("page_count {:?}", curr_page_array.pages_allocated);
 
-        match map_fixed(last_page_addr, self.page_size) {
+        match map_fixed(last_page_addr, page_size) {
             Ok(page_ptr) => {
                 curr_page_array.pages_allocated += 1;
 
@@ -180,7 +184,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
                 // Write the address of the new base page array to the page array buffer
                 // Remeber that this extra layer of indirection is necessary for keeping pages
                 // contiguous whenever possible
-                self.page_array_buffer[page_array_count] = new_page_array;
+                self.page_array_buffer[self.page_array_count as usize] = new_page_array;
 
                 page_ptr
             }
@@ -205,7 +209,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
         // TODO Figure out how to effectively clear the pointer to this underlying data in our
         // pointer array
         // Iterate over the page arrays and find which one holds the deallocated pointer
-        for i in 0..self.page_array_count() {
+        for i in 0..self.page_array_count as usize {
             let page_array = &mut self.page_array_buffer[i];
             let page_count = page_array.pages_allocated;
             let lower = page_array.pages.addr();
@@ -232,9 +236,8 @@ impl<'a> Default for YerbaPageAllocator<'a> {
 
 impl<'a> Drop for YerbaPageAllocator<'a> {
     fn drop(&mut self) {
-        let page_array_count = self.page_array_count();
         let page_blocks = &self.page_array_buffer;
-        for i in 0..page_array_count {
+        for i in 0..(self.page_array_count as usize) {
             let page_array = &page_blocks[i];
             unsafe {
                 libc::munmap(
@@ -256,12 +259,6 @@ impl<'a> Drop for YerbaPageAllocator<'a> {
 }
 
 impl<'a> YerbaPageAllocator<'a> {
-    fn page_array_count(&self) -> usize {
-        self.page_array_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .into()
-    }
-
     fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
         slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
     }
