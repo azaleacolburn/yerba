@@ -106,7 +106,6 @@ mod test {
         unsafe {
             let chunk = allocator.alloc(layout);
             assert!(!chunk.is_null());
-            println!("here");
             allocator.dealloc(chunk, layout);
 
             let one = allocator.alloc(layout);

@@ -249,17 +249,82 @@ impl<'a> Drop for YerbaPageAllocator<'a> {
         // I don't think this memory needs to be unmapped?
         // It might though
         // TODO Figure this out
-        // unsafe {
-        //     libc::munmap(
-        //         self.page_block_ptr_array.cast(),
-        //         size_of::<PageArray>() * 12,
-        //     )
-        // };
+        unsafe {
+            let success = libc::munmap(
+                self.page_array_buffer as *mut [PageArray] as *mut c_void,
+                size_of::<PageArray>() * 12,
+            );
+            if success == -1 {
+                panic!("Failed to unmap memory chunk");
+            }
+        };
     }
 }
 
 impl<'a> YerbaPageAllocator<'a> {
     fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
         slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use core::alloc::Layout;
+
+    #[test]
+    fn alloc_chunks() {
+        let mut allocator = YerbaPageAllocator::default();
+
+        unsafe {
+            let page = allocator.request_page();
+            assert!(!page.is_null());
+            allocator.relinquish_page(page);
+
+            let one = allocator.request_page();
+            assert!(!one.is_null());
+
+            let two = allocator.request_page();
+            assert!(!two.is_null());
+
+            allocator.relinquish_page(one);
+            allocator.relinquish_page(two);
+        }
+    }
+
+    #[test]
+    fn overflow() {
+        let mut allocator = YerbaPageAllocator::new(DEFAULT_PAGE_SIZE * 12);
+
+        unsafe {
+            let one = allocator.request_page();
+            assert!(!one.is_null());
+            allocator.relinquish_page(one);
+
+            let two = allocator.request_page();
+            assert!(!two.is_null());
+            allocator.relinquish_page(two);
+        }
+    }
+
+    #[test]
+    fn zeroed() {
+        let mut allocator = YerbaPageAllocator::default();
+
+        unsafe {
+            let one = allocator.request_page_zeroed();
+            assert!(!one.is_null());
+
+            let two = allocator.request_page_zeroed();
+            assert!(!two.is_null());
+
+            let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| *(one.wrapping_add(i))).sum();
+            assert_eq!(two_sum, 0);
+            assert_eq!(one_sum, 0);
+
+            allocator.relinquish_page(two);
+            allocator.relinquish_page(one);
+        }
     }
 }
