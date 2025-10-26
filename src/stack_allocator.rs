@@ -2,7 +2,6 @@ use core::{
     alloc::{self, GlobalAlloc},
     cell::UnsafeCell,
     ptr,
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const BUF_SIZE: usize = 4096;
@@ -11,26 +10,43 @@ const BUF_SIZE: usize = 4096;
 /// Allocates an initial buffer of 4096 bytes
 pub struct StackAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
-    offset: AtomicUsize,
+    offset: *mut usize,
 }
 
 impl StackAllocator {
     pub fn new() -> Self {
-        StackAllocator {
-            buf: UnsafeCell::new([0; BUF_SIZE]),
-            offset: AtomicUsize::new(0),
+        let mut buf = UnsafeCell::new([0; BUF_SIZE]);
+        let ptr = buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize;
+        unsafe { ptr.write(size_of::<usize>()) };
+        StackAllocator { buf, offset: ptr }
+    }
+
+    pub fn get_offset(&self) -> usize {
+        unsafe { (self.buf.get() as *mut usize).read() }
+    }
+
+    pub fn set_offset(&mut self, n: usize) {
+        unsafe { (self.buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize).write(n) }
+    }
+
+    pub fn add_offset(&self, n: usize) {
+        unsafe {
+            let ptr = self.buf.get() as *mut usize;
+            let value = ptr.read();
+            ptr.write(value + n);
+        }
+    }
+
+    pub fn sub_offset(&self, n: usize) {
+        unsafe {
+            let ptr = self.buf.get() as *mut usize;
+            let value = ptr.read();
+            ptr.write(value - n);
         }
     }
 
     pub fn is_top(&self, ptr: *const u8, size: usize) -> bool {
-        unsafe {
-            ptr.addr() + size
-                == self
-                    .buf
-                    .get()
-                    .byte_add(self.offset.load(Ordering::Relaxed))
-                    .addr()
-        }
+        unsafe { ptr.addr() + size == self.buf.get().byte_add(self.get_offset()).addr() }
     }
 }
 
@@ -44,7 +60,7 @@ unsafe impl GlobalAlloc for StackAllocator {
     unsafe fn alloc(&self, layout: alloc::Layout) -> *mut u8 {
         let size = layout.size();
         let align = layout.align();
-        let buf_offset = self.offset.load(Ordering::Relaxed);
+        let buf_offset = self.get_offset();
 
         let mut ptr: *mut u8 = unsafe { self.buf.get().byte_add(buf_offset) }.cast();
 
@@ -58,11 +74,7 @@ unsafe impl GlobalAlloc for StackAllocator {
             return ptr::null_mut();
         }
 
-        self.offset
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |offset| {
-                Some(offset + size)
-            })
-            .unwrap();
+        self.add_offset(size);
 
         ptr
     }
@@ -75,11 +87,7 @@ unsafe impl GlobalAlloc for StackAllocator {
             // panic!("Cannot deallocate block that is not on the top of the stack")
         }
 
-        self.offset
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |offset| {
-                Some(offset - size)
-            })
-            .unwrap();
+        self.sub_offset(size);
     }
 
     unsafe fn alloc_zeroed(&self, layout: alloc::Layout) -> *mut u8 {
@@ -97,14 +105,9 @@ unsafe impl GlobalAlloc for StackAllocator {
     /// Grows the allocated memory in-place
     unsafe fn realloc(&self, ptr: *mut u8, layout: alloc::Layout, new_size: usize) -> *mut u8 {
         let size = layout.size();
-        let top = unsafe {
-            self.buf
-                .get()
-                .byte_add(self.offset.load(Ordering::Relaxed))
-                .addr()
-        };
+        let top = unsafe { self.buf.get().byte_add(self.get_offset()).addr() };
         assert_eq!(ptr.addr() + size, top);
-        self.offset.fetch_add(new_size - size, Ordering::Relaxed);
+        self.add_offset(new_size - size);
 
         ptr
     }

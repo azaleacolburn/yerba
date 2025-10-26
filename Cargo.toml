@@ -3,6 +3,10 @@ name = "yerba"
 version = "0.1.0"
 edition = "2024"
 
+[[bench]]
+name = "linked_list"
+path = "benchmarks/linked_list.rs"
+
 
 [dependencies]
 libc = "0.2"
