@@ -1,5 +1,5 @@
 use core::alloc::GlobalAlloc;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use std::alloc::Layout;
 use yerba::{
     linked_list_allocator::LinkedListAllocator, page_allocator::YerbaPageAllocator,
@@ -41,22 +41,25 @@ fn stack_alloc(c: &mut Criterion) {
     });
 }
 
-fn c_malloc(c: &mut Criterion) {
+fn c_malloc_free(c: &mut Criterion) {
     c.bench_function("c_malloc", |b| {
         b.iter(|| unsafe {
             let t: *mut u8 = libc::calloc(5000, 1).cast();
             black_box(&t);
+            libc::free(t.cast());
         });
     });
 }
 
-fn c_malloc_free(c: &mut Criterion) {
-    c.bench_function("c_malloc_free", |b| {
-        b.iter(|| unsafe {
-            let t = libc::calloc(5000, 1);
-            black_box(&t);
-            libc::free(t);
-        });
+fn c_free(c: &mut Criterion) {
+    c.bench_function("c_free", |b| {
+        b.iter_batched(
+            || unsafe { libc::calloc(5000, 1) },
+            |chunk| unsafe {
+                libc::free(black_box(chunk));
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -65,7 +68,7 @@ criterion_group!(
     linked_alloc,
     linked_alloc_free,
     stack_alloc,
-    c_malloc,
-    c_malloc_free
+    c_malloc_free,
+    c_free,
 );
 criterion_main!(benches);
