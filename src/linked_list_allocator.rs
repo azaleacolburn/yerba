@@ -1,16 +1,12 @@
 use core::alloc::Layout;
+use core::cell::RefCell;
+use core::marker::PhantomData;
 use core::{
     alloc::GlobalAlloc,
     cell::UnsafeCell,
-    ffi::c_void,
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
-    sync::atomic::AtomicU8,
-    sync::atomic::Ordering,
 };
-use std::marker::PhantomData;
-
-use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
 use crate::page_allocator::YerbaPageAllocator;
 use crate::page_allocator_trait::PageAllocator;
@@ -167,13 +163,15 @@ impl From<*mut Header> for HeaderPtr {
 // Only allocates a single arena and returns a null pointer for allocations past that
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
 // Will merge empty blocks when necessary to fit new allocations
+//
+// NOTE Explicitly dropping is not important because
+// all the underlying memory is deallocated by the page allocator
 pub struct LinkedListAllocator<'a, A = YerbaPageAllocator<'a>>
 where
     A: PageAllocator,
 {
     buf: *mut UnsafeCell<[u8]>,
-    pages: AtomicU8,
-    page_allocator: A,
+    page_allocator: RefCell<A>,
     phantom: PhantomData<&'a ()>,
 }
 
@@ -202,8 +200,7 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
 
         Self {
             buf: first_page_buf,
-            pages: AtomicU8::new(1),
-            page_allocator,
+            page_allocator: RefCell::new(page_allocator),
             phantom: PhantomData,
         }
     }
@@ -218,38 +215,49 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
         unsafe { header_ptr.next_unchecked() }
     }
 
-    /// Requests a new page to accommodate a new block headed by `header_ptr` of size `size`
+    /// Requests a new page to accommodate a new block started at the old last_addr
+    /// Places both a new header representing a block of `size` and `alignment_offset`
+    /// Then creates a new top header with the remaining size
     /// # Args
     /// - `header_ptr`: the header pointer to be ultimately returned
     /// - `size`: the requested size of the block the header pointer will represent
     /// - `alignment_offset`: the calculated offset to be added to
     ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
     ///     is of type `*mut T`
-    /// # Safety
-    /// - Panics if header is null
-    /// - Panics if twelve or more pages have already been allocated (subject to change)
-    fn add_page(&self, header_ptr: &HeaderPtr, size: usize, alignment_offset: usize) {
-        assert!(!header_ptr.is_null());
-        self.request_new_page();
-
-        let remaining_size = self.last_addr()
-            - size_of::<Header>() * 2
-            - alignment_offset
-            - size
-            - self.buf_ptr().addr();
-
-        let header = Header::new(size, alignment_offset);
-        let header_ptr = HeaderPtr::new(slice_from_raw_parts_mut(header_ptr.0, size));
+    fn add_page(&self, size: usize, alignment_offset: usize) {
         unsafe {
-            header_ptr.write(header);
-        }
+            let old_last_header = self.last_block();
+            let old_last_addr = self.last_addr();
+            assert!(old_last_header.addr() <= old_last_addr);
 
-        let new_top_header = Header::new(remaining_size, 0);
-        let top_header_ptr = self.next_header(&header_ptr);
-        assert!(!top_header_ptr.is_null());
-        unsafe {
+            let new_page = self.page_allocator.borrow_mut().request_page();
+            assert_eq!(old_last_addr, new_page.addr());
+
+            let remaining_size = self.last_addr()
+                - size_of::<Header>() * 2
+                - alignment_offset
+                - size
+                - self.buf_ptr().addr();
+
+            let header = Header::new(size, alignment_offset);
+            old_last_header.write(header);
+
+            let new_top_header = Header::new(remaining_size, 0);
+            let top_header_ptr = self.next_header(&old_last_header);
+            assert!(!top_header_ptr.is_null());
             top_header_ptr.write(new_top_header);
         }
+    }
+
+    fn last_block(&self) -> HeaderPtr {
+        let mut frontier = self.first_block();
+        let mut next = self.next_header(&frontier);
+        while !next.is_null() {
+            frontier = next;
+            next = self.next_header(&frontier);
+        }
+
+        frontier
     }
 
     /// Gets the next block in the array, even if it's not initialized
@@ -304,7 +312,7 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
                 last_header_ptr.set(&header_ptr);
                 let next_block = &self.next_header(&header_ptr);
                 if next_block.is_null() {
-                    self.add_page(&header_ptr, size, alignment_offset);
+                    self.add_page(size, alignment_offset);
                     break;
                 }
                 header_ptr.set(next_block);
@@ -319,7 +327,7 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
     }
 
     fn last_addr(&self) -> usize {
-        let pages = self.pages.load(Ordering::Relaxed) as usize;
+        let pages = self.page_allocator.borrow().get_pages_allocated();
         unsafe { self.buf_ptr().add(PAGE_SIZE * pages).addr() }
     }
 
@@ -349,29 +357,6 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
         c
     }
 
-    // Allocates a new page in memory and then returns the new top HeaderPtr
-    // with provenance of PAGE_SIZE
-    fn request_new_page(&self) {
-        let pages = self.pages.fetch_add(1, Ordering::Relaxed) as usize - 1;
-
-        unsafe {
-            let base_addr = self.buf_ptr().cast::<c_void>().byte_add(PAGE_SIZE * pages);
-            let prog_brk = libc::mmap(
-                base_addr,
-                PAGE_SIZE,
-                PROT_READ | PROT_WRITE,
-                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-                -1,
-                0,
-            );
-
-            if prog_brk == MAP_FAILED {
-                panic!("Failed to allocate new page");
-            }
-            assert_eq!(prog_brk, base_addr);
-        }
-    }
-
     /// Attempts to split the allocated block represented
     /// by `header`, into two blocks
     fn try_split_allocated_block(&self, header: &HeaderPtr, requested_size: usize) {
@@ -398,7 +383,7 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
         next_header: &HeaderPtr,
         size: usize,
     ) -> bool {
-        let pages = self.pages.load(Ordering::Relaxed) as usize;
+        let pages = self.page_allocator.borrow().get_pages_allocated();
         header.size() > size_of::<Header>() + size
             && (next_header.addr() + size_of::<Header>())
                 < self.buf_ptr().addr() + PAGE_SIZE * pages
@@ -408,19 +393,6 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
 impl<'a> Default for LinkedListAllocator<'a> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<'a, A: PageAllocator> Drop for LinkedListAllocator<'a, A> {
-    fn drop(&mut self) {
-        let _pages = self.pages.load(Ordering::Relaxed) as usize;
-        unsafe {
-            self.buf.cast::<u8>().write_bytes(0, MAX_BLOCK_SIZE);
-            let success = libc::munmap(self.buf.cast::<c_void>(), MAX_BLOCK_SIZE);
-            if success == -1 {
-                panic!("Failed to unmap allocator memory");
-            }
-        };
     }
 }
 
@@ -502,6 +474,7 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
         if acc_size > new_size {
             return ptr;
         }
+        let alignment_offset = header_ptr.align_offset(layout.align());
         // Then start at the first block and check for available adjacent blocks again
         let mut anchor = self.first_block();
         while !anchor.is_null() {
@@ -522,7 +495,6 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
                 acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
 
                 if acc_size >= new_size {
-                    let alignment_offset = header_ptr.align_offset(layout.align());
                     unsafe {
                         header_ptr.set_offset(alignment_offset);
                         return header_ptr.get_data().add(alignment_offset);
@@ -532,12 +504,15 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
             }
         }
 
-        self.request_new_page();
-        let header_ptr = frontier;
-        // Ideally they don't request more than a page
-        while new_size > header_ptr.size() {
-            self.request_new_page();
-            unsafe { header_ptr.write_bytes(0, size_of::<Header>()) };
+        unsafe {
+            self.add_page(new_size, alignment_offset);
+
+            let header_ptr = frontier;
+            // Ideally they don't request more than a page
+            while new_size > header_ptr.size() {
+                self.add_page(new_size, alignment_offset);
+                header_ptr.write_bytes(0, size_of::<Header>());
+            }
         }
 
         let data_ptr = header_ptr.get_data();

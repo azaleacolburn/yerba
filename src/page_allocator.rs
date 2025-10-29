@@ -125,7 +125,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
                 // This is to establish provenance on our `UnsafeCell<[u8]>`
                 // In the future we might not do it this way
                 pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
-                pages_allocated: 1,
+                pages_allocated: 12,
                 pages_loaned: 0,
             };
             underlying_ptr_array[0] = initial_page_array;
@@ -151,16 +151,17 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
 
         let last_page_addr = curr_page_array.last_addr(page_size);
         if curr_page_array.pages_allocated > curr_page_array.pages_loaned {
-            return curr_page_array
+            curr_page_array.pages_loaned += 1;
+            let ptr: *mut u8 = curr_page_array
                 .pages
-                .wrapping_byte_add(size_of::<PageArray>() * curr_page_array.pages_loaned)
+                .wrapping_byte_add(page_size * curr_page_array.pages_loaned)
                 .cast();
+            return ptr;
         }
-        println!("last page addr {:?}", last_page_addr);
-        println!("page_count {:?}", curr_page_array.pages_allocated);
 
         match map_fixed(last_page_addr, page_size) {
             Ok(page_ptr) => {
+                curr_page_array.pages_loaned += 1;
                 curr_page_array.pages_allocated += 1;
 
                 page_ptr.cast()
@@ -168,7 +169,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
 
             Err(_) => {
                 println!("failed to allocate page");
-                let new_base_page = match map_arbitrary(self.page_size) {
+                let new_base_page = match map_arbitrary(self.page_size * 12) {
                     Ok(ptr) => ptr,
                     Err(_) => return ptr::null_mut(),
                 };
@@ -176,8 +177,8 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
                 // which is bad I think
                 let new_page_array = PageArray {
                     pages: self.to_page_ptr(new_base_page),
-                    pages_allocated: 1,
-                    pages_loaned: 0,
+                    pages_allocated: 12,
+                    pages_loaned: 1,
                 };
                 let page_ptr = new_page_array.pages.cast();
 
@@ -226,6 +227,20 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
             }
         }
     }
+
+    fn get_pages_allocated(&self) -> usize {
+        let page_array_count = self.page_array_count as usize;
+        let mut sum = 0;
+        for i in 0..page_array_count {
+            let page_array = &self.page_array_buffer[i];
+            sum += page_array.pages_loaned;
+        }
+        sum
+    }
+
+    fn get_page_size(&self) -> usize {
+        self.page_size
+    }
 }
 
 impl<'a> Default for YerbaPageAllocator<'a> {
@@ -270,7 +285,6 @@ impl<'a> YerbaPageAllocator<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use core::alloc::Layout;
 
     #[test]
     fn alloc_chunks() {
