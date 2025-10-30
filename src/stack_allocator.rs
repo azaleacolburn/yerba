@@ -1,12 +1,13 @@
 use core::{
-    alloc::{self, GlobalAlloc},
+    alloc::{self},
     cell::UnsafeCell,
-    ptr,
 };
 use std::{
-    alloc::{AllocError, Allocator},
+    alloc::{AllocError, Allocator, Layout},
     ptr::NonNull,
 };
+
+use crate::util::to_non_null_slice;
 
 const BUF_SIZE: usize = 4096;
 
@@ -49,8 +50,10 @@ impl StackAllocator {
         }
     }
 
-    pub fn is_top(&self, ptr: *const u8, size: usize) -> bool {
-        unsafe { ptr.addr() + size == self.buf.get().byte_add(self.get_offset()).addr() }
+    pub fn is_top(&self, ptr: NonNull<u8>, size: usize) -> bool {
+        unsafe {
+            usize::from(ptr.addr()) + size == self.buf.get().byte_add(self.get_offset()).addr()
+        }
     }
 }
 
@@ -80,11 +83,11 @@ unsafe impl Allocator for StackAllocator {
 
         self.add_offset(size);
 
-        Ok(ptr)
+        Ok(to_non_null_slice(ptr, size)?)
     }
 
     /// If ptr was not to the last allocated object, nothing happens
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: alloc::Layout) {
         let size = layout.size();
         if !self.is_top(ptr, layout.size()) {
             return;
@@ -94,26 +97,21 @@ unsafe impl Allocator for StackAllocator {
         self.sub_offset(size);
     }
 
-    unsafe fn alloc_zeroed(&self, layout: alloc::Layout) -> *mut u8 {
-        let size = layout.size();
-        let ptr = unsafe { self.alloc(layout) };
-
-        unsafe {
-            (0..size).for_each(|i| ptr.add(i).write(0));
-        }
-
-        ptr
-    }
-
     /// Panics if the memory to be reallocated is not on the top of the stack
     /// Grows the allocated memory in-place
-    unsafe fn realloc(&self, ptr: *mut u8, layout: alloc::Layout, new_size: usize) -> *mut u8 {
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
+        let new_size = new_layout.size();
         let top = unsafe { self.buf.get().byte_add(self.get_offset()).addr() };
-        assert_eq!(ptr.addr() + size, top);
+        assert_eq!(usize::from(ptr.addr()) + size, top);
         self.add_offset(new_size - size);
 
-        ptr
+        Ok(NonNull::slice_from_raw_parts(ptr, new_size))
     }
 }
 
@@ -129,41 +127,18 @@ mod test {
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let chunk = allocator.alloc(layout);
-            assert!(!chunk.is_null());
-            allocator.dealloc(chunk, layout);
+            let chunk = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(chunk, layout);
 
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+            let three = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            let three = allocator.alloc(layout);
-            assert!(!three.is_null());
-
-            allocator.dealloc(three, layout);
-            allocator.dealloc(two, layout);
-            allocator.dealloc(one, layout);
+            allocator.deallocate(three, layout);
+            allocator.deallocate(two, layout);
+            allocator.deallocate(one, layout);
         }
     }
-    //
-    // #[test]
-    // #[should_panic]
-    // fn out_of_order() {
-    //     let allocator = StackAllocator::new();
-    //     let layout = Layout::new::<[u8; 16]>();
-    //
-    //     unsafe {
-    //         let one = allocator.alloc(layout);
-    //         assert!(!one.is_null());
-    //
-    //         let two = allocator.alloc(layout);
-    //         assert!(!two.is_null());
-    //
-    //         allocator.dealloc(one, layout);
-    //     }
-    // }
 
     #[test]
     fn zeroed() {
@@ -171,14 +146,11 @@ mod test {
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let one = allocator.alloc_zeroed(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate_zeroed(layout).unwrap().cast();
+            let two = allocator.allocate_zeroed(layout).unwrap().cast();
 
-            let two = allocator.alloc_zeroed(layout);
-            assert!(!two.is_null());
-
-            allocator.dealloc(two, layout);
-            allocator.dealloc(one, layout);
+            allocator.deallocate(two, layout);
+            allocator.deallocate(one, layout);
         }
     }
 
@@ -186,17 +158,15 @@ mod test {
     fn realloc() {
         let allocator = StackAllocator::new();
         let layout = Layout::new::<[u8; 16]>();
+        let second_layout = Layout::new::<[u8; 32]>();
 
         unsafe {
-            let one = allocator.alloc_zeroed(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate_zeroed(layout).unwrap().cast();
+            let two = allocator.allocate_zeroed(layout).unwrap().cast();
 
-            let two = allocator.alloc_zeroed(layout);
-            assert!(!two.is_null());
-
-            allocator.realloc(two, layout, 32);
-            allocator.dealloc(two, Layout::new::<[u8; 32]>());
-            allocator.dealloc(one, layout);
+            allocator.grow(two, layout, second_layout);
+            allocator.deallocate(two, second_layout);
+            allocator.deallocate(one, layout);
         }
     }
 }

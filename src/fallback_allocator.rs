@@ -1,5 +1,4 @@
 use core::alloc::Allocator;
-use core::alloc::GlobalAlloc;
 use std::alloc::AllocError;
 use std::ptr::NonNull;
 
@@ -82,7 +81,9 @@ where
 mod test {
     use core::alloc::Layout;
 
-    use crate::{linked_list_allocator::ContiguousListAllocator, stack_allocator::StackAllocator};
+    use crate::{
+        contiguous_list_allocator::ContiguousListAllocator, stack_allocator::StackAllocator,
+    };
 
     use super::*;
 
@@ -92,22 +93,16 @@ mod test {
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let chunk = allocator.alloc(layout);
-            assert!(!chunk.is_null());
-            allocator.dealloc(chunk, layout);
+            let chunk = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(chunk, layout);
 
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+            let three = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            let three = allocator.alloc(layout);
-            assert!(!three.is_null());
-
-            allocator.dealloc(three, layout);
-            allocator.dealloc(one, layout);
-            allocator.dealloc(two, layout);
+            allocator.deallocate(three, layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, layout);
         }
     }
 
@@ -117,13 +112,11 @@ mod test {
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-            allocator.dealloc(one, layout);
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-            allocator.dealloc(two, layout);
+            let two = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(two, layout);
         }
     }
 
@@ -133,19 +126,16 @@ mod test {
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let one = allocator.alloc_zeroed(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate_zeroed(layout).unwrap().cast();
+            let two = allocator.allocate_zeroed(layout).unwrap().cast();
 
-            let two = allocator.alloc_zeroed(layout);
-            assert!(!two.is_null());
-
-            let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();
-            let one_sum: u8 = (0..16).into_iter().map(|i| *(one.wrapping_add(i))).sum();
+            let two_sum: u8 = (0..16).into_iter().map(|i| two.add(i).read()).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| one.add(i).read()).sum();
             assert_eq!(two_sum, 0);
             assert_eq!(one_sum, 0);
 
-            allocator.dealloc(two, layout);
-            allocator.dealloc(one, layout);
+            allocator.deallocate(two, layout);
+            allocator.deallocate(one, layout);
         }
     }
 
@@ -153,17 +143,15 @@ mod test {
     fn realloc() {
         let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
+        let second_layout = Layout::new::<[u8; 32]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            allocator.realloc(two, layout, 32);
-            allocator.dealloc(one, layout);
-            allocator.dealloc(two, Layout::new::<[u8; 32]>());
+            allocator.grow(two, layout, second_layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, second_layout);
         }
     }
 
@@ -171,15 +159,14 @@ mod test {
     fn merge() {
         let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 2000]>();
+        let second_layout = Layout::new::<[u8; 3080]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-            allocator.dealloc(one, layout);
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
 
-            let layout = Layout::new::<[u8; 3080]>();
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
+            let two = allocator.allocate(second_layout).unwrap().cast();
+            allocator.deallocate(two, layout);
         }
     }
 }

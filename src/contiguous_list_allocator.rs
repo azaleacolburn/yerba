@@ -1,17 +1,17 @@
+use crate::page_allocator::ArrayPageAllocator;
+use crate::page_allocator_trait::PageAllocator;
+use crate::util::to_non_null_slice;
+use core::alloc::AllocError;
 use core::alloc::Allocator;
 use core::alloc::Layout;
 use core::cell::RefCell;
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 use core::{
     cell::UnsafeCell,
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
 };
-use std::alloc::AllocError;
-use std::ptr::NonNull;
-
-use crate::page_allocator::ArrayPageAllocator;
-use crate::page_allocator_trait::PageAllocator;
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK_SIZE: usize = 8;
@@ -194,23 +194,31 @@ impl From<*mut Header> for HeaderPtr {
 /// # Usage
 /// ## Direct Allocation
 /// ```rust
+/// #![feature(allocator_api)]
+/// use yerba::contiguous_list_allocator::ContiguousListAllocator;
+/// use core::alloc::{Allocator, Layout};
+///
+/// let test = 0;
 /// let allocator = ContiguousListAllocator::new();
 /// let layout = Layout::new::<[u8; 16]>();
 ///
 /// unsafe {
-///     let chunk = allocator.alloc_zeroed(layout);
-///     assert!(!chunk.is_null());
+///     let chunk = allocator.allocate_zeroed(layout).unwrap().cast();
 ///     chunk.write_bytes(1, 16);
-///     allocator.dealloc(chunk, layout);
-/// }```
+///     allocator.deallocate(chunk, layout);
+/// }
+/// ```
 ///
 /// ## Use in a structure
 /// ```rust
-/// let chunk = Box::<u8, ContiguousListAllocator>::new([u8, 16]);
+/// #![feature(allocator_api)]
+/// use yerba::contiguous_list_allocator::ContiguousListAllocator;
+///
+/// let allocator = ContiguousListAllocator::new();
+/// let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
 /// chunk[0] = 1;
 /// ```
 ///
-#[derive(Debug)]
 pub struct ContiguousListAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
@@ -227,10 +235,8 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
             assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
-        let head = Header::default();
 
         let mut page_allocator = A::new(PAGE_SIZE);
-
         let first_page_ptr = unsafe { page_allocator.request_page_zeroed() };
         if first_page_ptr.is_null() {
             panic!("Failed to allocate the first page");
@@ -239,6 +245,7 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
         let first_page_buf =
             slice_from_raw_parts_mut(first_page_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
 
+        let head = Header::default();
         unsafe {
             first_page_buf.cast::<Header>().write(head);
         }
@@ -275,12 +282,11 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     fn add_page(&self, size: usize) -> Result<(), ()> {
         unsafe {
             let header = self.last_block();
-
             let old_last_addr = self.last_addr();
 
             let new_page = self.page_allocator.borrow_mut().request_page();
-            // Asserts that new page is contiguous with the old one
-            if old_last_addr != new_page.addr() {
+            // Fails if the new page is null or not contiguous with the old one
+            if new_page.is_null() || old_last_addr != new_page.addr() {
                 return Err(());
             }
 
@@ -325,52 +331,50 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
         let mut header_ptr = self.first_block();
 
         while !header_ptr.is_null() {
-            unsafe {
-                if header_ptr.used() {
-                    last_header_ptr.set(&header_ptr);
-                    let next_block = &self.next_header(&header_ptr);
-                    header_ptr.set(next_block);
+            if header_ptr.used() {
+                last_header_ptr.set(&header_ptr);
+                let next_block = &self.next_header(&header_ptr);
+                header_ptr.set(next_block);
 
-                    continue;
-                }
+                continue;
+            }
 
-                // We don't actually use this pointer again, it's just for calculating the offset
-                let data_ptr = header_ptr.add(1).cast::<u8>();
-                let alignment_offset = data_ptr.align_offset(align);
-                if alignment_offset == usize::MAX {
+            // We don't actually use this pointer again, it's just for calculating the offset
+            let data_ptr = header_ptr.wrapping_add(1).cast::<u8>();
+            let alignment_offset = data_ptr.align_offset(align);
+            if alignment_offset == usize::MAX {
+                return HeaderPtr::null();
+            }
+
+            let required_size = size + alignment_offset;
+            let fits = header_ptr.size() >= required_size;
+
+            // We've found a block that fits
+            if fits {
+                header_ptr.set_offset(alignment_offset);
+
+                break;
+            }
+
+            // We've found a pair of free blocks that can be merged to fit
+            let mergeable = !last_header_ptr.is_null() && !last_header_ptr.used();
+            if mergeable {
+                let merge_failed =
+                    !header_ptr.merge_block(&mut last_header_ptr, required_size, align);
+                if merge_failed {
                     return HeaderPtr::null();
                 }
 
-                let required_size = size + alignment_offset;
-                let fits = header_ptr.size() >= required_size;
-
-                // We've found a block that fits
-                if fits {
-                    header_ptr.set_offset(alignment_offset);
-
-                    break;
-                }
-
-                // We've found a pair of free blocks that can be merged to fit
-                let mergeable = !last_header_ptr.is_null() && !last_header_ptr.used();
-                if mergeable {
-                    let merge_failed =
-                        !header_ptr.merge_block(&mut last_header_ptr, required_size, align);
-                    if merge_failed {
-                        return HeaderPtr::null();
-                    }
-
-                    break;
-                }
-
-                last_header_ptr.set(&header_ptr);
-                let next_block = &self.next_header(&header_ptr);
-                if next_block.is_null() {
-                    self.add_page(size);
-                    break;
-                }
-                header_ptr.set(next_block);
+                break;
             }
+
+            last_header_ptr.set(&header_ptr);
+            let next_block = &self.next_header(&header_ptr);
+            if next_block.is_null() {
+                self.add_page(size);
+                break;
+            }
+            header_ptr.set(next_block);
         }
 
         header_ptr
@@ -382,7 +386,7 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
 
     fn last_addr(&self) -> usize {
         let pages = self.page_allocator.borrow().get_pages_allocated();
-        unsafe { self.buf_ptr().add(PAGE_SIZE * pages).addr() }
+        self.buf_ptr().wrapping_add(PAGE_SIZE * pages).addr()
     }
 
     fn buf_ptr(&self) -> *mut u8 {
@@ -459,11 +463,6 @@ fn is_invalid_layout(&layout: &Layout) -> bool {
         || size + size_of::<Header>() > MAX_BLOCK_SIZE
 }
 
-fn to_non_null_slice<T>(data_ptr: *mut T, size: usize) -> Result<NonNull<[T]>, AllocError> {
-    let not_null = NonNull::new(data_ptr).ok_or_else(|| AllocError)?;
-    Ok(NonNull::<[T]>::slice_from_raw_parts(not_null, size))
-}
-
 unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
     /// Allocates a new block with capacity `size` in the allocator
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
@@ -487,14 +486,11 @@ unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
         if end_of_block > top_of_buf {
             return Err(AllocError);
         }
-        header.mark_used();
 
+        header.mark_used();
         self.try_split_allocated_block(&header, size);
 
-        let not_null = NonNull::new(data_ptr).ok_or_else(|| AllocError)?;
-        let return_slice: NonNull<[u8]> = NonNull::slice_from_raw_parts(not_null, size);
-
-        Ok(return_slice)
+        Ok(to_non_null_slice(data_ptr, size)?)
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {

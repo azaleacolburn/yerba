@@ -1,9 +1,9 @@
 use crate::page_allocator_trait::PageAllocator;
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use core::ptr::slice_from_raw_parts_mut;
 use core::ptr::{self};
 use libc::{self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
-use std::cell::UnsafeCell;
-use std::ptr::slice_from_raw_parts_mut;
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
