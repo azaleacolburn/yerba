@@ -219,6 +219,7 @@ impl From<*mut Header> for HeaderPtr {
 /// chunk[0] = 1;
 /// ```
 ///
+///
 pub struct ContiguousListAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
@@ -229,6 +230,11 @@ where
 }
 
 impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
+    /// Creates a new contiguous list allocator
+    ///
+    /// # Safety
+    /// Panics if:
+    /// - The first page cannot be allocated
     pub fn new() -> Self {
         const {
             let header_size = size_of::<Header>();

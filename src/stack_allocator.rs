@@ -11,8 +11,75 @@ use crate::util::to_non_null_slice;
 
 const BUF_SIZE: usize = 4096;
 
+/// Allocator shaped like a stack
 /// Allows the allocation and deallocation of memory in a LIFO system
-/// Allocates an initial buffer of 4096 bytes
+/// Allocates an initial buffer of 4096 bytes in-place on the stack
+///
+/// # Use Cases
+/// ## Use if
+/// - You need blazingly fast LIFO allocations, in a loop, for instance
+/// ## Limitations
+/// - Fixed-size buffer, does not reserve more memory
+/// - LIFO
+/// - Cannot perform reallocations
+///
+/// # Usage
+///
+/// ## With manual allocations
+/// ```rust
+/// #![feature(allocator_api)]
+/// use yerba::stack_allocator::StackAllocator;
+/// use core::alloc::{Allocator, Layout};
+///
+/// let allocator = StackAllocator::new();
+/// let layout = Layout::new::<[u8; 16]>();
+///
+/// unsafe {
+///     let chunk = allocator.allocate(layout).unwrap().cast();
+///     allocator.deallocate(chunk, layout);
+///
+///     let one = allocator.allocate(layout).unwrap().cast();
+///     let two = allocator.allocate(layout).unwrap().cast();
+///     let three = allocator.allocate(layout).unwrap().cast();
+///
+///     allocator.deallocate(three, layout);
+///     allocator.deallocate(two, layout);
+///     allocator.deallocate(one, layout);
+/// }
+/// ```
+/// ## With Rust structures
+/// ```rust
+/// #![feature(allocator_api)]
+/// use yerba::stack_allocator::StackAllocator;
+/// use core::alloc::{Allocator, Layout};
+///
+/// let allocator = StackAllocator::new();
+/// for i in 0..12 {
+///     let mut one = Box::new_in([0; 16], &allocator);
+///     let mut two = Box::new_in([0 as i32; 13], &allocator);
+///     let mut three = Box::new_in([0 as usize; 12], &allocator);
+///
+///     one[i] = 14;
+///     two[12] = 9;
+///     three[4] = one.as_ptr().addr();
+///
+///     // Gets dropped automatically
+/// }
+/// ```
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
+/// # Notes
+/// - Future iterations (or future allocators) may be LIFO and allow buffer growth as well as
+/// custom initial buffer sizes
 pub struct StackAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
     offset: *mut usize,
@@ -167,6 +234,23 @@ mod test {
             allocator.grow(two, layout, second_layout);
             allocator.deallocate(two, second_layout);
             allocator.deallocate(one, layout);
+        }
+    }
+
+    #[test]
+    fn in_loop() {
+        let allocator = StackAllocator::new();
+
+        for i in 0..12 {
+            let mut one = Box::new_in([0; 16], &allocator);
+            let mut two = Box::new_in([0 as i32; 13], &allocator);
+            let mut three = Box::new_in([0 as usize; 12], &allocator);
+
+            one[i] = 14;
+            two[12] = 9;
+            three[4] = one.as_ptr().addr();
+
+            // Gets dropped automatically
         }
     }
 }
