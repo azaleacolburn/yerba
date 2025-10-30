@@ -1,14 +1,16 @@
+use core::alloc::Allocator;
 use core::alloc::Layout;
 use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::{
-    alloc::GlobalAlloc,
     cell::UnsafeCell,
     ops::Deref,
     ptr::{self, slice_from_raw_parts_mut},
 };
+use std::alloc::AllocError;
+use std::ptr::NonNull;
 
-use crate::page_allocator::YerbaPageAllocator;
+use crate::page_allocator::ArrayPageAllocator;
 use crate::page_allocator_trait::PageAllocator;
 
 const PAGE_SIZE: usize = 4096;
@@ -29,12 +31,16 @@ struct Header {
 
 impl Default for Header {
     fn default() -> Self {
-        Header::new(PAGE_SIZE - size_of::<Header>(), 0)
+        Header::new(PAGE_SIZE - size_of::<Header>())
     }
 }
 
 impl Header {
-    pub fn new(size: usize, offset: usize) -> Header {
+    pub fn new(size: usize) -> Header {
+        Header { size, offset: 0 }
+    }
+
+    pub fn with_offset(size: usize, offset: usize) -> Header {
         Header { size, offset }
     }
 }
@@ -117,6 +123,7 @@ impl HeaderPtr {
         }
     }
 
+    /// Merges two consecutive memory blocks in the buffer
     fn merge_block(
         &mut self,
         last_header: &mut HeaderPtr,
@@ -166,7 +173,45 @@ impl From<*mut Header> for HeaderPtr {
 //
 // NOTE Explicitly dropping is not important because
 // all the underlying memory is deallocated by the page allocator
-pub struct LinkedListAllocator<'a, A = YerbaPageAllocator<'a>>
+//
+/// An allocator in the shape of a single contiguous buffer, capable of performing allocations, deallocations, and reallocations.
+/// It automatically merges and splits free block when suitable.
+///
+/// # Use Cases
+/// This is a versatile allocator with few limitations
+/// ## Especially suitable for
+/// - Lots of small-midsized allocations/reallocations
+/// - Single threaded code
+///
+/// ## Limitations
+/// - Fails to allocate/reallocate if there isn't enough space in the underlying buffer and the system call to
+/// request more contiguous memory fails.
+/// - Not suitable for large allocations/reallocations or multithreaded code
+///
+/// While plugging in a custom `PageAllocator` is possible, it is not recommended to use one that
+/// plans to allocate more than one contiguous page, as this allocator could not utilize it fully.
+///
+/// # Usage
+/// ## Direct Allocation
+/// ```rust
+/// let allocator = ContiguousListAllocator::new();
+/// let layout = Layout::new::<[u8; 16]>();
+///
+/// unsafe {
+///     let chunk = allocator.alloc_zeroed(layout);
+///     assert!(!chunk.is_null());
+///     chunk.write_bytes(1, 16);
+///     allocator.dealloc(chunk, layout);
+/// }```
+///
+/// ## Use in a structure
+/// ```rust
+/// let chunk = Box::<u8, ContiguousListAllocator>::new([u8, 16]);
+/// chunk[0] = 1;
+/// ```
+///
+#[derive(Debug)]
+pub struct ContiguousListAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
 {
@@ -175,7 +220,7 @@ where
     phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
+impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     pub fn new() -> Self {
         const {
             let header_size = size_of::<Header>();
@@ -224,29 +269,38 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
     /// - `alignment_offset`: the calculated offset to be added to
     ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
     ///     is of type `*mut T`
-    fn add_page(&self, size: usize, alignment_offset: usize) {
+    /// # Safety
+    /// Panics if:
+    /// - a new page contiguous page cannot be allocated
+    fn add_page(&self, size: usize) -> Result<(), ()> {
         unsafe {
-            let old_last_header = self.last_block();
+            let header = self.last_block();
+
             let old_last_addr = self.last_addr();
-            assert!(old_last_header.addr() <= old_last_addr);
 
             let new_page = self.page_allocator.borrow_mut().request_page();
-            assert_eq!(old_last_addr, new_page.addr());
+            // Asserts that new page is contiguous with the old one
+            if old_last_addr != new_page.addr() {
+                return Err(());
+            }
 
-            let remaining_size = self.last_addr()
-                - size_of::<Header>() * 2
-                - alignment_offset
-                - size
-                - self.buf_ptr().addr();
+            header.set_size(size);
+            self.try_split_allocated_block(&header, size);
 
-            let header = Header::new(size, alignment_offset);
-            old_last_header.write(header);
-
-            let new_top_header = Header::new(remaining_size, 0);
-            let top_header_ptr = self.next_header(&old_last_header);
-            assert!(!top_header_ptr.is_null());
-            top_header_ptr.write(new_top_header);
+            // NOTE This should be covered by spliting the expanded top block
+            // let remaining_size = self.last_addr()
+            //     - size_of::<Header>() * 2
+            //     - alignment_offset
+            //     - size
+            //     - self.buf_ptr().addr();
+            //
+            // let new_top_header = Header::new(remaining_size);
+            // let top_header_ptr = self.next_header(&old_last_header);
+            // assert!(!top_header_ptr.is_null());
+            // top_header_ptr.write(new_top_header);
         }
+
+        Ok(())
     }
 
     fn last_block(&self) -> HeaderPtr {
@@ -312,7 +366,7 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
                 last_header_ptr.set(&header_ptr);
                 let next_block = &self.next_header(&header_ptr);
                 if next_block.is_null() {
-                    self.add_page(size, alignment_offset);
+                    self.add_page(size);
                     break;
                 }
                 header_ptr.set(next_block);
@@ -337,9 +391,9 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
 
     /// Finds the block representing the given data pointer
     /// If it does not exist, null is returned instead
-    fn find_ptr_block(&self, ptr: *mut u8) -> HeaderPtr {
+    fn find_ptr_block(&self, ptr: NonNull<u8>) -> HeaderPtr {
         let mut block = self.first_block();
-        while !block.is_null() && block.get_data() != ptr {
+        while !block.is_null() && block.get_data() != ptr.as_ptr() {
             block.set(&self.next_header(&block));
         }
 
@@ -358,20 +412,20 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
     }
 
     /// Attempts to split the allocated block represented
-    /// by `header`, into two blocks
-    fn try_split_allocated_block(&self, header: &HeaderPtr, requested_size: usize) {
+    /// by `header`, into two blocks, the first one of size `new_size`
+    ///
+    /// Does nothing if there isn't enough space to split the block
+    /// Or if `new_size > header.size() + size_of::<Header>()`
+    fn try_split_allocated_block(&self, header: &HeaderPtr, new_size: usize) {
         let next_header = unsafe { header.next_unchecked() };
-        if !self.can_split_allocated_block(&header, &next_header, requested_size) {
+        if !self.can_split_allocated_block(&header, &next_header, new_size) {
             return;
         }
 
-        let new_block_size = header.size() - size_of::<Header>() - requested_size;
-        header.set_size(requested_size);
+        let second_block_size = header.size() - size_of::<Header>() - new_size;
+        header.set_size(new_size);
 
-        let new_header = Header {
-            size: new_block_size,
-            offset: 0,
-        };
+        let new_header = Header::new(second_block_size);
         unsafe {
             next_header.write(new_header);
         }
@@ -381,16 +435,16 @@ impl<'a, A: PageAllocator> LinkedListAllocator<'a, A> {
         &self,
         header: &HeaderPtr,
         next_header: &HeaderPtr,
-        size: usize,
+        new_size: usize,
     ) -> bool {
-        let pages = self.page_allocator.borrow().get_pages_allocated();
-        header.size() > size_of::<Header>() + size
-            && (next_header.addr() + size_of::<Header>())
-                < self.buf_ptr().addr() + PAGE_SIZE * pages
+        let space_for_new_block = header.size() > size_of::<Header>() + new_size;
+        let within_buffer = (next_header.addr() + size_of::<Header>()) < self.last_addr();
+
+        space_for_new_block && within_buffer
     }
 }
 
-impl<'a> Default for LinkedListAllocator<'a> {
+impl<'a> Default for ContiguousListAllocator<'a> {
     fn default() -> Self {
         Self::new()
     }
@@ -405,13 +459,18 @@ fn is_invalid_layout(&layout: &Layout) -> bool {
         || size + size_of::<Header>() > MAX_BLOCK_SIZE
 }
 
-unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
+fn to_non_null_slice<T>(data_ptr: *mut T, size: usize) -> Result<NonNull<[T]>, AllocError> {
+    let not_null = NonNull::new(data_ptr).ok_or_else(|| AllocError)?;
+    Ok(NonNull::<[T]>::slice_from_raw_parts(not_null, size))
+}
+
+unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
     /// Allocates a new block with capacity `size` in the allocator
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
     /// and a pointer to the first of the headers will be returned
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if is_invalid_layout(&layout) {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
 
         let size = layout.size();
@@ -419,23 +478,26 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
 
         let mut header = self.find_empty_block(size, align);
         if header.is_null() {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
         let data_ptr = header.get_data();
 
         let end_of_block = data_ptr.addr() + size;
         let top_of_buf = self.last_addr();
         if end_of_block > top_of_buf {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
         header.mark_used();
 
         self.try_split_allocated_block(&header, size);
 
-        data_ptr
+        let not_null = NonNull::new(data_ptr).ok_or_else(|| AllocError)?;
+        let return_slice: NonNull<[u8]> = NonNull::slice_from_raw_parts(not_null, size);
+
+        Ok(return_slice)
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {
         let mut block = self.find_ptr_block(ptr);
         if block.is_null() {
             return;
@@ -445,12 +507,13 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
         block.set_offset(0);
     }
 
-    unsafe fn realloc(
+    unsafe fn grow(
         &self,
-        ptr: *mut u8,
-        layout: core::alloc::Layout,
-        new_size: usize,
-    ) -> *mut u8 {
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let new_size = new_layout.size();
         // First look forward for adjacent free blocks
         let mut header_ptr = self.find_ptr_block(ptr);
         header_ptr.free();
@@ -466,13 +529,16 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
                 let alignment_offset = header_ptr.align_offset(layout.align());
                 unsafe {
                     header_ptr.set_offset(alignment_offset);
-                    return header_ptr.get_data().add(alignment_offset);
+                    return Ok(to_non_null_slice(
+                        header_ptr.get_data().add(alignment_offset),
+                        new_size,
+                    )?);
                 }
             }
             unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
         }
         if acc_size > new_size {
-            return ptr;
+            return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
         }
         let alignment_offset = header_ptr.align_offset(layout.align());
         // Then start at the first block and check for available adjacent blocks again
@@ -497,7 +563,10 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
                 if acc_size >= new_size {
                     unsafe {
                         header_ptr.set_offset(alignment_offset);
-                        return header_ptr.get_data().add(alignment_offset);
+                        return to_non_null_slice(
+                            header_ptr.get_data().add(alignment_offset),
+                            new_size,
+                        );
                     }
                 }
                 unsafe { frontier.set(&HeaderPtr(frontier.add(1))) };
@@ -505,40 +574,30 @@ unsafe impl<'a> GlobalAlloc for LinkedListAllocator<'a> {
         }
 
         unsafe {
-            self.add_page(new_size, alignment_offset);
+            self.add_page(new_size);
 
             let header_ptr = frontier;
             // Ideally they don't request more than a page
             while new_size > header_ptr.size() {
-                self.add_page(new_size, alignment_offset);
+                self.add_page(new_size);
                 header_ptr.write_bytes(0, size_of::<Header>());
             }
         }
 
         let data_ptr = header_ptr.get_data();
         let alignment_offset = data_ptr.align_offset(layout.align());
-        let data_ptr = unsafe { data_ptr.add(alignment_offset) };
+        let data_ptr = unsafe { to_non_null_slice(data_ptr.add(alignment_offset), new_size)? };
 
         if new_size + alignment_offset > header_ptr.size() {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
 
-        return data_ptr;
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let size = layout.size();
-        unsafe {
-            let ptr = self.alloc(layout);
-            if ptr.is_null() {
-                return ptr::null_mut();
-            }
-
-            ptr.write_bytes(0, size);
-            ptr
-        }
+        return Ok(data_ptr);
     }
 }
+
+unsafe impl<'a> Sync for ContiguousListAllocator<'a> {}
+unsafe impl<'a> Send for ContiguousListAllocator<'a> {}
 
 #[cfg(test)]
 mod test {
@@ -547,98 +606,94 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let allocator = LinkedListAllocator::new();
+        let allocator = ContiguousListAllocator::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let chunk = allocator.alloc(layout);
-            assert!(!chunk.is_null());
-            allocator.dealloc(chunk, layout);
+            let chunk = allocator.allocate(layout).unwrap();
+            allocator.deallocate(chunk.cast(), layout);
 
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+            let three = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            let three = allocator.alloc(layout);
-            assert!(!three.is_null());
-
-            allocator.dealloc(three, layout);
-            allocator.dealloc(one, layout);
-            allocator.dealloc(two, layout);
+            allocator.deallocate(three, layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, layout);
         }
     }
 
     #[test]
     fn overflow() {
-        let allocator = LinkedListAllocator::new();
+        let allocator = ContiguousListAllocator::new();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-            allocator.dealloc(one, layout);
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-            allocator.dealloc(two, layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, layout);
         }
     }
 
     #[test]
     fn zeroed() {
-        let allocator = LinkedListAllocator::new();
+        let allocator = ContiguousListAllocator::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
-            let one = allocator.alloc_zeroed(layout);
-            assert!(!one.is_null());
+            let one: NonNull<u8> = allocator.allocate_zeroed(layout).unwrap().cast();
+            let two: NonNull<u8> = allocator.allocate_zeroed(layout).unwrap().cast();
 
-            let two = allocator.alloc_zeroed(layout);
-            assert!(!two.is_null());
-
-            let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();
-            let one_sum: u8 = (0..16).into_iter().map(|i| *(one.wrapping_add(i))).sum();
+            let two_sum: u8 = (0..16).into_iter().map(|i| two.add(i).read()).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| one.add(i).read()).sum();
             assert_eq!(two_sum, 0);
             assert_eq!(one_sum, 0);
 
-            allocator.dealloc(two, layout);
-            allocator.dealloc(one, layout);
+            allocator.deallocate(two, layout);
+            allocator.deallocate(one, layout);
         }
     }
 
     #[test]
     fn realloc() {
-        let allocator = LinkedListAllocator::new();
+        let allocator = ContiguousListAllocator::new();
         let layout = Layout::new::<[u8; 16]>();
+        let new_layout = Layout::new::<[u8; 32]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
 
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
-
-            allocator.realloc(two, layout, 32);
-            allocator.dealloc(one, layout);
-            allocator.dealloc(two, Layout::new::<[u8; 32]>());
+            allocator.grow(two, layout, new_layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, new_layout);
         }
     }
 
     #[test]
     fn merge() {
-        let allocator = LinkedListAllocator::new();
+        let allocator = ContiguousListAllocator::new();
         let layout = Layout::new::<[u8; 2000]>();
+        let second_layout = Layout::new::<[u8; 3080]>();
 
         unsafe {
-            let one = allocator.alloc(layout);
-            assert!(!one.is_null());
-            allocator.dealloc(one, layout);
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
 
-            let layout = Layout::new::<[u8; 3080]>();
-            let two = allocator.alloc(layout);
-            assert!(!two.is_null());
+            let two = allocator.allocate(second_layout).unwrap().cast();
+            allocator.deallocate(two, second_layout);
         }
+    }
+
+    // #[global_allocator]
+    // static GLOBAL_ALLOCATOR: ContiguousListAllocator = ContiguousListAllocator::new();
+
+    #[test]
+    fn with_box() {
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
+        chunk[0] = 1;
     }
 }

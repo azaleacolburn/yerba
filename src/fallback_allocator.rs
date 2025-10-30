@@ -1,4 +1,7 @@
+use core::alloc::Allocator;
 use core::alloc::GlobalAlloc;
+use std::alloc::AllocError;
+use std::ptr::NonNull;
 
 /// Holds an allocator of each given type
 /// When allocation, reallocation, or deallocation is done, it first calls one allocator, then the
@@ -8,8 +11,8 @@ use core::alloc::GlobalAlloc;
 /// - `A` functions must not panic on failure, instead returning a null_ptr or early returning
 struct FallbackAllocator<A, F>
 where
-    A: GlobalAlloc,
-    F: GlobalAlloc,
+    A: Allocator,
+    F: Allocator,
 {
     main_allocator: A,
     fallback_allocator: F,
@@ -17,8 +20,8 @@ where
 
 impl<A, F> FallbackAllocator<A, F>
 where
-    A: GlobalAlloc + Default,
-    F: GlobalAlloc + Default,
+    A: Allocator + Default,
+    F: Allocator + Default,
 {
     fn new() -> Self {
         Self {
@@ -28,24 +31,21 @@ where
     }
 }
 
-unsafe impl<A, F> GlobalAlloc for FallbackAllocator<A, F>
+unsafe impl<A, F> Allocator for FallbackAllocator<A, F>
 where
-    A: GlobalAlloc,
-    F: GlobalAlloc,
+    A: Allocator,
+    F: Allocator,
 {
     /// Calls `GlobalAlloc::alloc` on the main allocator, then if that fails, on the fallback allocator
     ///
     /// # Safety
     /// - Neither `A::alloc` nor `F::alloc` may panic if allocation fails, they must instead return a
     /// null pointer
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        unsafe {
-            let mut data_ptr = self.main_allocator.alloc(layout);
-            if data_ptr.is_null() {
-                data_ptr = self.fallback_allocator.alloc(layout);
-            }
-
-            data_ptr
+    fn allocate(&self, layout: std::alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let data_ptr = self.main_allocator.allocate(layout);
+        match data_ptr {
+            Ok(ptr) => Ok(ptr),
+            Err(_) => Ok(self.fallback_allocator.allocate(layout)?),
         }
     }
 
@@ -55,37 +55,25 @@ where
     /// - Neither `A::dealloc` nor `F::dealloc` may panic if the specified pointer is not available
     ///     - This may be changed in the future if `FallbackAllocator` is expanded to hold the bounds
     ///     of both sub allocators
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: std::alloc::Layout) {
         unsafe {
-            self.main_allocator.dealloc(ptr, layout);
-            self.fallback_allocator.dealloc(ptr, layout);
+            self.main_allocator.deallocate(ptr, layout);
+            self.fallback_allocator.deallocate(ptr, layout);
         }
     }
 
-    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        layout: std::alloc::Layout,
+        new_layout: std::alloc::Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
-            let mut data_ptr = self.main_allocator.realloc(ptr, layout, new_size);
-            if data_ptr.is_null() {
-                data_ptr = self.fallback_allocator.realloc(ptr, layout, new_size);
+            let data_ptr = self.main_allocator.grow(ptr, layout, new_layout);
+            match data_ptr {
+                Ok(ptr) => Ok(ptr),
+                Err(_) => Ok(self.fallback_allocator.grow(ptr, layout, new_layout)?),
             }
-
-            data_ptr
-        }
-    }
-
-    /// Calls `GlobalAlloc::alloc_zeored` on the main allocator, then if that fails, on the fallback allocator
-    ///
-    /// # Safety
-    /// - Neither `A::alloc_zeored` nor `F::alloc_zeored` may panic if allocation fails, they must instead return a
-    /// null pointer
-    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        unsafe {
-            let mut data_ptr = self.main_allocator.alloc_zeroed(layout);
-            if data_ptr.is_null() {
-                data_ptr = self.fallback_allocator.alloc_zeroed(layout);
-            }
-
-            data_ptr
         }
     }
 }
@@ -94,13 +82,13 @@ where
 mod test {
     use core::alloc::Layout;
 
-    use crate::{linked_list_allocator::LinkedListAllocator, stack_allocator::StackAllocator};
+    use crate::{linked_list_allocator::ContiguousListAllocator, stack_allocator::StackAllocator};
 
     use super::*;
 
     #[test]
     fn alloc_chunks() {
-        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -125,7 +113,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
@@ -141,7 +129,7 @@ mod test {
 
     #[test]
     fn zeroed() {
-        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -163,7 +151,7 @@ mod test {
 
     #[test]
     fn realloc() {
-        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -181,7 +169,7 @@ mod test {
 
     #[test]
     fn merge() {
-        let allocator = FallbackAllocator::<StackAllocator, LinkedListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
         let layout = Layout::new::<[u8; 2000]>();
 
         unsafe {

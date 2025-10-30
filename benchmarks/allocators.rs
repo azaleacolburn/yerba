@@ -2,12 +2,12 @@ use core::alloc::GlobalAlloc;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use std::alloc::Layout;
 use yerba::{
-    linked_list_allocator::LinkedListAllocator, page_allocator::YerbaPageAllocator,
+    linked_list_allocator::ContiguousListAllocator, page_allocator::ArrayPageAllocator,
     stack_allocator::StackAllocator,
 };
 
 pub fn linked_alloc(c: &mut Criterion) {
-    let allocator = LinkedListAllocator::<'_, YerbaPageAllocator>::new();
+    let allocator = ContiguousListAllocator::<'_, ArrayPageAllocator>::new();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("linked_alloc", |b| {
         b.iter(|| unsafe {
@@ -18,7 +18,7 @@ pub fn linked_alloc(c: &mut Criterion) {
 }
 
 fn linked_alloc_free(c: &mut Criterion) {
-    let allocator = LinkedListAllocator::<'_, YerbaPageAllocator>::new();
+    let allocator = ContiguousListAllocator::<'_, ArrayPageAllocator>::new();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("linked_alloc_free", |b| {
         b.iter(|| unsafe {

@@ -19,7 +19,7 @@ type Page = UnsafeCell<[u8]>;
 /// Pages are not guaranteed to be contiguous with respect to each other
 /// The allocator will attempt to make them contiguous, however, if the allocation of a contiguous
 /// block with mmap(fixed) fails, a new base of contiguous pages will be allocated
-pub struct YerbaPageAllocator<'a> {
+pub struct ArrayPageAllocator<'a> {
     page_size: usize,
     // Represents the number of page_arrays we've allocated
     page_array_count: u8,
@@ -98,13 +98,13 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
     Ok(ptr)
 }
 
-impl<'a> YerbaPageAllocator<'a> {
+impl<'a> ArrayPageAllocator<'a> {
     fn current_page_array(&mut self) -> &mut PageArray {
         &mut self.page_array_buffer[self.page_array_count as usize - 1]
     }
 }
 
-impl<'a> PageAllocator for YerbaPageAllocator<'a> {
+impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     fn new(page_size: usize) -> Self {
         unsafe {
             // Create the underlying block for storing pointers to arrays of blocks and the sizes
@@ -134,7 +134,7 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
                 map_fixed(base_page_ptr, page_size).expect("Failed to allocate first page");
             assert_eq!(first_block_ptr, base_page_ptr);
 
-            YerbaPageAllocator {
+            ArrayPageAllocator {
                 page_size,
                 page_array_count: 1,
                 page_array_buffer: underlying_ptr_array,
@@ -243,13 +243,13 @@ impl<'a> PageAllocator for YerbaPageAllocator<'a> {
     }
 }
 
-impl<'a> Default for YerbaPageAllocator<'a> {
+impl<'a> Default for ArrayPageAllocator<'a> {
     fn default() -> Self {
         Self::new(DEFAULT_PAGE_SIZE)
     }
 }
 
-impl<'a> Drop for YerbaPageAllocator<'a> {
+impl<'a> Drop for ArrayPageAllocator<'a> {
     fn drop(&mut self) {
         let page_blocks = &self.page_array_buffer;
         for i in 0..(self.page_array_count as usize) {
@@ -276,7 +276,7 @@ impl<'a> Drop for YerbaPageAllocator<'a> {
     }
 }
 
-impl<'a> YerbaPageAllocator<'a> {
+impl<'a> ArrayPageAllocator<'a> {
     fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
         slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
     }
@@ -288,7 +288,7 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let mut allocator = YerbaPageAllocator::default();
+        let mut allocator = ArrayPageAllocator::default();
 
         unsafe {
             let page = allocator.request_page();
@@ -308,7 +308,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let mut allocator = YerbaPageAllocator::new(DEFAULT_PAGE_SIZE * 12);
+        let mut allocator = ArrayPageAllocator::new(DEFAULT_PAGE_SIZE * 12);
 
         unsafe {
             let one = allocator.request_page();
@@ -323,7 +323,7 @@ mod test {
 
     #[test]
     fn zeroed() {
-        let mut allocator = YerbaPageAllocator::default();
+        let mut allocator = ArrayPageAllocator::default();
 
         unsafe {
             let one = allocator.request_page_zeroed();

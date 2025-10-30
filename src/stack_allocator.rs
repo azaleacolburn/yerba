@@ -3,6 +3,10 @@ use core::{
     cell::UnsafeCell,
     ptr,
 };
+use std::{
+    alloc::{AllocError, Allocator},
+    ptr::NonNull,
+};
 
 const BUF_SIZE: usize = 4096;
 
@@ -56,8 +60,8 @@ impl Default for StackAllocator {
     }
 }
 
-unsafe impl GlobalAlloc for StackAllocator {
-    unsafe fn alloc(&self, layout: alloc::Layout) -> *mut u8 {
+unsafe impl Allocator for StackAllocator {
+    fn allocate(&self, layout: alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
         let align = layout.align();
         let buf_offset = self.get_offset();
@@ -66,17 +70,17 @@ unsafe impl GlobalAlloc for StackAllocator {
 
         let alignment_offset = ptr.align_offset(align);
         if alignment_offset == usize::MAX {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
         ptr = unsafe { ptr.add(alignment_offset) };
 
         if ptr.addr() + size >= unsafe { self.buf.get().byte_add(BUF_SIZE).addr() } {
-            return ptr::null_mut();
+            return Err(AllocError);
         }
 
         self.add_offset(size);
 
-        ptr
+        Ok(ptr)
     }
 
     /// If ptr was not to the last allocated object, nothing happens
