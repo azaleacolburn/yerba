@@ -1,6 +1,5 @@
-use core::alloc::GlobalAlloc;
+use core::alloc::{GlobalAlloc, Layout};
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
-use std::alloc::Layout;
 use yerba::{
     linked_list_allocator::ContiguousListAllocator, page_allocator::ArrayPageAllocator,
     stack_allocator::StackAllocator,

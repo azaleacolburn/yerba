@@ -1,6 +1,5 @@
-use core::alloc::Allocator;
-use std::alloc::AllocError;
-use std::ptr::NonNull;
+use core::alloc::{AllocError, Allocator, Layout};
+use core::ptr::NonNull;
 
 /// Holds an allocator of each given type
 /// When allocation, reallocation, or deallocation is done, it first calls one allocator, then the
@@ -40,7 +39,7 @@ where
     /// # Safety
     /// - Neither `A::alloc` nor `F::alloc` may panic if allocation fails, they must instead return a
     /// null pointer
-    fn allocate(&self, layout: std::alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let data_ptr = self.main_allocator.allocate(layout);
         match data_ptr {
             Ok(ptr) => Ok(ptr),
@@ -54,7 +53,7 @@ where
     /// - Neither `A::dealloc` nor `F::dealloc` may panic if the specified pointer is not available
     ///     - This may be changed in the future if `FallbackAllocator` is expanded to hold the bounds
     ///     of both sub allocators
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: std::alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe {
             self.main_allocator.deallocate(ptr, layout);
             self.fallback_allocator.deallocate(ptr, layout);
@@ -64,8 +63,8 @@ where
     unsafe fn grow(
         &self,
         ptr: NonNull<u8>,
-        layout: std::alloc::Layout,
-        new_layout: std::alloc::Layout,
+        layout: Layout,
+        new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
             let data_ptr = self.main_allocator.grow(ptr, layout, new_layout);

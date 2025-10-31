@@ -1,9 +1,6 @@
 use core::{
-    alloc::{self},
-    cell::UnsafeCell,
-};
-use std::{
     alloc::{AllocError, Allocator, Layout},
+    cell::UnsafeCell,
     ptr::NonNull,
 };
 
@@ -131,7 +128,7 @@ impl Default for StackAllocator {
 }
 
 unsafe impl Allocator for StackAllocator {
-    fn allocate(&self, layout: alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
         let align = layout.align();
         let buf_offset = self.get_offset();
@@ -154,7 +151,7 @@ unsafe impl Allocator for StackAllocator {
     }
 
     /// If ptr was not to the last allocated object, nothing happens
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         let size = layout.size();
         if !self.is_top(ptr, layout.size()) {
             return;

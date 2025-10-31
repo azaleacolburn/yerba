@@ -1,4 +1,4 @@
-pub trait PageAllocator {
+pub trait PageAllocator: Send + Sync {
     fn new(page: usize) -> Self;
     unsafe fn request_page(&mut self) -> *mut u8;
     unsafe fn request_page_zeroed(&mut self) -> *mut u8;

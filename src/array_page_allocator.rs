@@ -1,4 +1,4 @@
-use crate::page_allocator_trait::PageAllocator;
+use crate::page_allocator::PageAllocator;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr::slice_from_raw_parts_mut;
@@ -242,6 +242,9 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         self.page_size
     }
 }
+
+unsafe impl<'a> Send for ArrayPageAllocator<'a> {}
+unsafe impl<'a> Sync for ArrayPageAllocator<'a> {}
 
 impl<'a> Default for ArrayPageAllocator<'a> {
     fn default() -> Self {
