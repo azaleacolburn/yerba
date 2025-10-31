@@ -1,9 +1,8 @@
 use crate::array_page_allocator::ArrayPageAllocator;
+use crate::newable::Newable;
 use crate::page_allocator::PageAllocator;
 use crate::util::to_non_null_slice;
-use core::alloc::AllocError;
-use core::alloc::Allocator;
-use core::alloc::Layout;
+use core::alloc::{AllocError, Allocator, Layout};
 use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -186,16 +185,18 @@ impl From<NonNull<Header>> for HeaderPtr {
 ///
 /// While plugging in a custom `PageAllocator` is possible, it is not recommended to use one that
 /// plans to allocate more than one contiguous page, as this allocator could not utilize it fully.
+/// This, of course, is not the case if you pass in a specific instance of a `PageAllocator` with
+/// `ContiguousListAllocator::with_allocator`
 ///
 /// # Usage
 /// ## Direct Allocation
 /// ```rust
 /// #![feature(allocator_api)]
-/// use yerba::contiguous_list_allocator::ContiguousListAllocator;
+/// use yerba::{contiguous_list_allocator::ContiguousListAllocator, array_page_allocator::ArrayPageAllocator};
 /// use core::alloc::{Allocator, Layout};
 ///
 /// let test = 0;
-/// let allocator = ContiguousListAllocator::new();
+/// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
 /// let layout = Layout::new::<[u8; 16]>();
 ///
 /// unsafe {
@@ -225,20 +226,41 @@ where
     phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
+impl<'a, A> ContiguousListAllocator<'a, A>
+where
+    A: PageAllocator + Newable,
+{
     /// Creates a new contiguous list allocator
+    /// Manually allocates its own page_allocator (not recommended )
     ///
     /// # Safety
     /// Panics if:
     /// - The first page cannot be allocated
+    ///
+    /// # Usage
+    /// ```rust
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator};
+    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+    /// ```
     pub fn new() -> Self {
+        let page_allocator = A::new(PAGE_SIZE);
+        Self::with_allocator(page_allocator)
+    }
+}
+
+impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
+    /// Creates a new contiguous list allocator with a given `PageAllocator` instance
+    ///
+    /// # Safety
+    /// Panics if:
+    /// - The first page cannot be allocated
+    pub fn with_allocator(mut page_allocator: A) -> Self {
         const {
             let header_size = size_of::<Header>();
             assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
 
-        let mut page_allocator = A::new(PAGE_SIZE);
         let first_page_ptr = unsafe { page_allocator.request_page_zeroed() };
         if first_page_ptr.is_null() {
             panic!("Failed to allocate the first page");
@@ -281,7 +303,7 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     /// # Safety
     /// Panics if:
     /// - a new page contiguous page cannot be allocated
-    fn add_page(&self, size: usize) -> Result<(), AllocError> {
+    pub fn add_page(&self, size: usize) -> Result<(), AllocError> {
         unsafe {
             let mut header = self.last_block();
             let initial_header_size = header.size();
@@ -464,7 +486,10 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     }
 }
 
-impl<'a> Default for ContiguousListAllocator<'a> {
+impl<'a, A> Default for ContiguousListAllocator<'a, A>
+where
+    A: PageAllocator + Newable,
+{
     fn default() -> Self {
         Self::new()
     }
@@ -479,7 +504,10 @@ fn is_invalid_layout(&layout: &Layout) -> bool {
         || size + size_of::<Header>() > MAX_BLOCK_SIZE
 }
 
-unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
+unsafe impl<'a, A> Allocator for ContiguousListAllocator<'a, A>
+where
+    A: PageAllocator,
+{
     /// Allocates a new block with capacity `size` in the allocator
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
     /// and a pointer to the first of the headers will be returned
@@ -610,9 +638,6 @@ unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
     }
 }
 
-unsafe impl<'a> Sync for ContiguousListAllocator<'a> {}
-unsafe impl<'a> Send for ContiguousListAllocator<'a> {}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -620,7 +645,7 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -639,7 +664,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
@@ -653,7 +678,7 @@ mod test {
 
     #[test]
     fn zeroed() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -672,7 +697,7 @@ mod test {
 
     #[test]
     fn realloc() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
         let new_layout = Layout::new::<[u8; 32]>();
 
@@ -688,7 +713,7 @@ mod test {
 
     #[test]
     fn merge() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 
@@ -701,12 +726,26 @@ mod test {
         }
     }
 
-    // #[global_allocator]
-    // static GLOBAL_ALLOCATOR: ContiguousListAllocator = ContiguousListAllocator::new();
+    #[test]
+    fn multiple_allocators() {
+        let mut page_allocator = ArrayPageAllocator::default();
+        let allocator =
+            ContiguousListAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator);
+        let layout = Layout::new::<[u8; 2000]>();
+        let second_layout = Layout::new::<[u8; 3080]>();
+
+        unsafe {
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
+
+            let two = allocator.allocate(second_layout).unwrap().cast();
+            allocator.deallocate(two, second_layout);
+        }
+    }
 
     #[test]
     fn with_box() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::new();
         let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
         chunk[0] = 1;
     }

@@ -1,3 +1,4 @@
+use crate::newable::Newable;
 use crate::page_allocator::PageAllocator;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -104,7 +105,7 @@ impl<'a> ArrayPageAllocator<'a> {
     }
 }
 
-impl<'a> PageAllocator for ArrayPageAllocator<'a> {
+impl<'a> Newable for ArrayPageAllocator<'a> {
     fn new(page_size: usize) -> Self {
         unsafe {
             // Create the underlying block for storing pointers to arrays of blocks and the sizes
@@ -141,7 +142,9 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
             }
         }
     }
+}
 
+impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     unsafe fn request_page(&mut self) -> *mut u8 {
         let page_array_count = self.page_array_count;
         assert!(page_array_count < 12);

@@ -1,8 +1,80 @@
-pub trait PageAllocator: Send + Sync {
-    fn new(page: usize) -> Self;
+use std::cell::RefCell;
+
+pub trait PageAllocator {
     unsafe fn request_page(&mut self) -> *mut u8;
     unsafe fn request_page_zeroed(&mut self) -> *mut u8;
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
     fn get_pages_allocated(&self) -> usize;
     fn get_page_size(&self) -> usize;
+
+    /// Creates a "by reference" adapter for this instance of `PageAllocator`.
+    ///
+    /// The returned adapter also implements `PageAllocator` and will simply borrow this.
+    #[inline(always)]
+    fn by_ref(&self) -> &Self
+    where
+        Self: Sized,
+    {
+        self
+    }
+}
+
+impl<A> PageAllocator for &mut A
+where
+    A: PageAllocator,
+{
+    #[inline]
+    unsafe fn request_page(&mut self) -> *mut u8 {
+        unsafe { (**self).request_page() }
+    }
+
+    #[inline]
+    unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
+        unsafe { (**self).request_page_zeroed() }
+    }
+
+    #[inline]
+    unsafe fn relinquish_page(&mut self, ptr: *mut u8) {
+        unsafe { (**self).relinquish_page(ptr) }
+    }
+
+    #[inline]
+    fn get_pages_allocated(&self) -> usize {
+        (**self).get_pages_allocated()
+    }
+
+    #[inline]
+    fn get_page_size(&self) -> usize {
+        (**self).get_page_size()
+    }
+}
+
+impl<A> PageAllocator for RefCell<A>
+where
+    A: PageAllocator,
+{
+    #[inline]
+    unsafe fn request_page(&mut self) -> *mut u8 {
+        unsafe { (*self.borrow_mut()).request_page() }
+    }
+
+    #[inline]
+    unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
+        unsafe { (*self.borrow_mut()).request_page_zeroed() }
+    }
+
+    #[inline]
+    unsafe fn relinquish_page(&mut self, ptr: *mut u8) {
+        unsafe { (*self.borrow_mut()).relinquish_page(ptr) }
+    }
+
+    #[inline]
+    fn get_pages_allocated(&self) -> usize {
+        (*self.borrow_mut()).get_pages_allocated()
+    }
+
+    #[inline]
+    fn get_page_size(&self) -> usize {
+        (*self.borrow_mut()).get_page_size()
+    }
 }
