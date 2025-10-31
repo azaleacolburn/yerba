@@ -78,11 +78,10 @@ fn stack_alloc(c: &mut Criterion) {
 }
 
 fn c_malloc_free(c: &mut Criterion) {
-    c.bench_function("c_malloc", |b| {
+    c.bench_function("c_malloc_free", |b| {
         b.iter(|| unsafe {
-            let t: *mut u8 = libc::calloc(5000, 1).cast();
-            black_box(&t);
-            libc::free(t.cast());
+            let t = libc::malloc(5000);
+            libc::free(black_box(t));
         });
     });
 }
@@ -90,7 +89,7 @@ fn c_malloc_free(c: &mut Criterion) {
 fn c_free(c: &mut Criterion) {
     c.bench_function("c_free", |b| {
         b.iter_batched(
-            || unsafe { libc::calloc(5000, 1) },
+            || unsafe { libc::malloc(5000) },
             |chunk| unsafe {
                 libc::free(black_box(chunk));
             },
