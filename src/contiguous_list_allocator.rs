@@ -245,7 +245,7 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
         }
 
         let first_page_buf =
-            slice_from_raw_parts_mut(first_page_ptr as *mut u8, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+            slice_from_raw_parts_mut(first_page_ptr, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
 
         let head = Header::default();
         unsafe {
@@ -260,7 +260,6 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     }
 
     fn next_header(&self, header_ptr: &HeaderPtr) -> Option<HeaderPtr> {
-        println!("testing2: {:?}", unsafe { header_ptr.read() });
         if header_ptr.size() == 0 {
             panic!("Should not have zero sized headers")
         }
@@ -378,15 +377,12 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
             }
 
             last_header_ptr = Some(*header_ptr);
-            println!("testing: {:?}", unsafe { header_ptr.read() });
             let next_header = &self.next_header(&header_ptr);
             if let None = next_header {
                 let pre = self.last_addr();
                 self.add_page(size)?;
                 let post = self.last_addr();
                 assert_eq!(post - pre, PAGE_SIZE);
-                // assert_eq!(curr_header_ptr.unwrap(), self.last_block());
-                // println!("HERE: {:?} {:?}", curr_header_ptr, self.last_block());
 
                 break;
             }
@@ -440,17 +436,12 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     /// Does nothing if there isn't enough space to split the block
     /// Or if `new_size > header.size() + size_of::<Header>()`
     fn try_split_allocated_block(&self, header: &mut HeaderPtr, new_size: usize) {
-        unsafe {
-            println!("header: {:?}", header.read());
-        }
         let next_header = unsafe { header.next_unchecked() };
         if !self.can_split_allocated_block(&header, &next_header, new_size) {
-            println!("here: {}", new_size);
             return;
         }
 
         let second_block_size = header.size() - size_of::<Header>() - new_size;
-        println!("new_size: {}", new_size);
         header.set_size(new_size);
 
         let new_header = Header::new(second_block_size);
@@ -500,24 +491,17 @@ unsafe impl<'a> Allocator for ContiguousListAllocator<'a> {
         let size = layout.size();
         let align = layout.align();
 
-        println!("buf ptr {:?}", self.buf_ptr());
         let mut header = self.find_empty_block(size, align)?;
-        println!("headerafter {:?}", header);
         let data_ptr = header.get_data();
 
         let end_of_block = data_ptr.addr() + size;
         let top_of_buf = self.last_addr();
         if end_of_block > top_of_buf {
-            println!(
-                "here nono: {:?} {:?} {:?}",
-                size, end_of_block as *mut u8, top_of_buf as *mut u8
-            );
             return Err(AllocError);
         }
 
         header.mark_used();
         self.try_split_allocated_block(&mut header, size);
-        println!("HERE YAY");
 
         Ok(to_non_null_slice(data_ptr, size)?)
     }

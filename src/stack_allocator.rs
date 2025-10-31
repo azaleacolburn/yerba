@@ -141,7 +141,8 @@ unsafe impl Allocator for StackAllocator {
         }
         ptr = unsafe { ptr.add(alignment_offset) };
 
-        if ptr.addr() + size >= unsafe { self.buf.get().byte_add(BUF_SIZE).addr() } {
+        let last_addr = unsafe { self.buf.get().byte_add(BUF_SIZE).addr() };
+        if ptr.addr() + size >= last_addr {
             return Err(AllocError);
         }
 
