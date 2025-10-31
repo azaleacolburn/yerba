@@ -18,7 +18,7 @@ pub fn contiguous_list_create(c: &mut Criterion) {
 }
 
 pub fn contiguous_list_alloc(c: &mut Criterion) {
-    let allocator = ContiguousListAllocator::new();
+    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> = ContiguousListAllocator::new();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_alloc", |b| {
         b.iter(|| unsafe {
@@ -29,7 +29,7 @@ pub fn contiguous_list_alloc(c: &mut Criterion) {
 }
 
 fn contiguous_list_free(c: &mut Criterion) {
-    let allocator = ContiguousListAllocator::new();
+    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> = ContiguousListAllocator::new();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_free", |b| {
         b.iter_batched(
@@ -44,7 +44,7 @@ fn contiguous_list_free(c: &mut Criterion) {
 }
 
 fn contiguous_list_alloc_free(c: &mut Criterion) {
-    let allocator = ContiguousListAllocator::new();
+    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> = ContiguousListAllocator::new();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_alloc_free", |b| {
         b.iter(|| unsafe {
