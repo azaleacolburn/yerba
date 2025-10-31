@@ -6,7 +6,7 @@ use core::{
 
 use crate::util::to_non_null_slice;
 
-const BUF_SIZE: usize = 4096;
+const BUF_SIZE: usize = 4096 * 2;
 
 /// Allocator shaped like a stack
 /// Allows the allocation and deallocation of memory in a LIFO system

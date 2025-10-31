@@ -2,7 +2,20 @@
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
-use yerba::{contiguous_list_allocator::ContiguousListAllocator, stack_allocator::StackAllocator};
+use yerba::{
+    array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator,
+    stack_allocator::StackAllocator,
+};
+
+pub fn contiguous_list_create(c: &mut Criterion) {
+    c.bench_function("contiguous_list_create", |b| {
+        b.iter(|| unsafe {
+            let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> =
+                ContiguousListAllocator::new();
+            black_box(&allocator);
+        });
+    });
+}
 
 pub fn contiguous_list_alloc(c: &mut Criterion) {
     let allocator = ContiguousListAllocator::new();
@@ -42,9 +55,18 @@ fn contiguous_list_alloc_free(c: &mut Criterion) {
     });
 }
 
+pub fn stack_create(c: &mut Criterion) {
+    c.bench_function("stack_create", |b| {
+        b.iter(|| unsafe {
+            let allocator = StackAllocator::new();
+            black_box(&allocator);
+        });
+    });
+}
+
 fn stack_alloc(c: &mut Criterion) {
     let allocator = StackAllocator::new();
-    let layout = Layout::new::<[u8; 31]>();
+    let layout = Layout::new::<[u8; 5000]>();
 
     c.bench_function("stack_alloc_free", |b| {
         b.iter(|| unsafe {
@@ -88,18 +110,22 @@ fn rust_box_alloc_free(c: &mut Criterion) {
 
 fn contiguous_allocator_box_alloc_free(c: &mut Criterion) {
     c.bench_function("contiguous_allocator_box_alloc_free", |b| {
+        let allocator = ContiguousListAllocator::new();
+        let layout = Layout::new::<[u8; 5000]>();
         b.iter(|| {
-            let allocator = ContiguousListAllocator::new();
-            let b = Box::<[u8; 5000], ContiguousListAllocator>::new_in([0; 5000], allocator);
+            let mut b = Box::<[u8; 5000], &ContiguousListAllocator>::new_in([0; 5000], &allocator);
+            black_box(&b);
         });
     });
 }
 
 criterion_group!(
     benches,
+    contiguous_list_create,
     contiguous_list_alloc,
     contiguous_list_free,
     contiguous_list_alloc_free,
+    stack_create,
     stack_alloc,
     c_malloc_free,
     c_free,
