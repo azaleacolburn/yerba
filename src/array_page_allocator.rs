@@ -1,5 +1,5 @@
-use crate::newable::Newable;
 use crate::page_allocator::PageAllocator;
+use crate::with_page_size::WithPageSize;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr::slice_from_raw_parts_mut;
@@ -62,6 +62,45 @@ impl PageArray {
     }
 }
 
+impl<'a> WithPageSize for ArrayPageAllocator<'a> {
+    fn with_page_size(page_size: usize) -> Self {
+        unsafe {
+            // Create the underlying block for storing pointers to arrays of blocks and the sizes
+            // of those arrays
+            // This will be of type `*mut [PageArray]`
+            let page_ptr_ptr = map_arbitrary(size_of::<PageArray>() * 12)
+                .expect("Failed to reserve the underlying pointer array");
+            let underlying_ptr_array =
+                &mut *(slice_from_raw_parts_mut(page_ptr_ptr as *mut u8, page_size)
+                    as *mut [PageArray]);
+
+            // The first pointer to the array of page pointers (PageArray)
+            // This will be of type `*mut Page`
+            let base_page_ptr =
+                map_arbitrary(page_size * 12).expect("Failed to reserve initial page array");
+
+            let initial_page_array = PageArray {
+                // This is to establish provenance on our `UnsafeCell<[u8]>`
+                // In the future we might not do it this way
+                pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
+                pages_allocated: 12,
+                pages_loaned: 0,
+            };
+            underlying_ptr_array[0] = initial_page_array;
+
+            let first_block_ptr =
+                map_fixed(base_page_ptr, page_size).expect("Failed to allocate first page");
+            assert_eq!(first_block_ptr, base_page_ptr);
+
+            ArrayPageAllocator {
+                page_size,
+                page_array_count: 1,
+                page_array_buffer: underlying_ptr_array,
+            }
+        }
+    }
+}
+
 fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
     let ptr = unsafe {
         libc::mmap(
@@ -102,45 +141,6 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
 impl<'a> ArrayPageAllocator<'a> {
     fn current_page_array(&mut self) -> &mut PageArray {
         &mut self.page_array_buffer[self.page_array_count as usize - 1]
-    }
-}
-
-impl<'a> Newable for ArrayPageAllocator<'a> {
-    fn new(page_size: usize) -> Self {
-        unsafe {
-            // Create the underlying block for storing pointers to arrays of blocks and the sizes
-            // of those arrays
-            // This will be of type `*mut [PageArray]`
-            let page_ptr_ptr = map_arbitrary(size_of::<PageArray>() * 12)
-                .expect("Failed to reserve the underlying pointer array");
-            let underlying_ptr_array =
-                &mut *(slice_from_raw_parts_mut(page_ptr_ptr as *mut u8, page_size)
-                    as *mut [PageArray]);
-
-            // The first pointer to the array of page pointers (PageArray)
-            // This will be of type `*mut Page`
-            let base_page_ptr =
-                map_arbitrary(page_size * 12).expect("Failed to reserve initial page array");
-
-            let initial_page_array = PageArray {
-                // This is to establish provenance on our `UnsafeCell<[u8]>`
-                // In the future we might not do it this way
-                pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
-                pages_allocated: 12,
-                pages_loaned: 0,
-            };
-            underlying_ptr_array[0] = initial_page_array;
-
-            let first_block_ptr =
-                map_fixed(base_page_ptr, page_size).expect("Failed to allocate first page");
-            assert_eq!(first_block_ptr, base_page_ptr);
-
-            ArrayPageAllocator {
-                page_size,
-                page_array_count: 1,
-                page_array_buffer: underlying_ptr_array,
-            }
-        }
     }
 }
 
@@ -251,7 +251,7 @@ unsafe impl<'a> Sync for ArrayPageAllocator<'a> {}
 
 impl<'a> Default for ArrayPageAllocator<'a> {
     fn default() -> Self {
-        Self::new(DEFAULT_PAGE_SIZE)
+        Self::with_page_size(DEFAULT_PAGE_SIZE)
     }
 }
 
@@ -314,7 +314,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let mut allocator = ArrayPageAllocator::new(DEFAULT_PAGE_SIZE * 12);
+        let mut allocator = ArrayPageAllocator::with_page_size(DEFAULT_PAGE_SIZE * 12);
 
         unsafe {
             let one = allocator.request_page();

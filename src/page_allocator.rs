@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 pub trait PageAllocator {
     unsafe fn request_page(&mut self) -> *mut u8;
     unsafe fn request_page_zeroed(&mut self) -> *mut u8;
@@ -46,35 +44,5 @@ where
     #[inline]
     fn get_page_size(&self) -> usize {
         (**self).get_page_size()
-    }
-}
-
-impl<A> PageAllocator for RefCell<A>
-where
-    A: PageAllocator,
-{
-    #[inline]
-    unsafe fn request_page(&mut self) -> *mut u8 {
-        unsafe { (*self.borrow_mut()).request_page() }
-    }
-
-    #[inline]
-    unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
-        unsafe { (*self.borrow_mut()).request_page_zeroed() }
-    }
-
-    #[inline]
-    unsafe fn relinquish_page(&mut self, ptr: *mut u8) {
-        unsafe { (*self.borrow_mut()).relinquish_page(ptr) }
-    }
-
-    #[inline]
-    fn get_pages_allocated(&self) -> usize {
-        (*self.borrow_mut()).get_pages_allocated()
-    }
-
-    #[inline]
-    fn get_page_size(&self) -> usize {
-        (*self.borrow_mut()).get_page_size()
     }
 }

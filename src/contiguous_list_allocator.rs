@@ -1,7 +1,7 @@
 use crate::array_page_allocator::ArrayPageAllocator;
-use crate::newable::Newable;
 use crate::page_allocator::PageAllocator;
 use crate::util::to_non_null_slice;
+use crate::with_page_size::WithPageSize;
 use core::alloc::{AllocError, Allocator, Layout};
 use core::cell::RefCell;
 use core::marker::PhantomData;
@@ -195,8 +195,7 @@ impl From<NonNull<Header>> for HeaderPtr {
 /// use yerba::{contiguous_list_allocator::ContiguousListAllocator, array_page_allocator::ArrayPageAllocator};
 /// use core::alloc::{Allocator, Layout};
 ///
-/// let test = 0;
-/// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+/// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
 /// let layout = Layout::new::<[u8; 16]>();
 ///
 /// unsafe {
@@ -211,7 +210,7 @@ impl From<NonNull<Header>> for HeaderPtr {
 /// #![feature(allocator_api)]
 /// use yerba::contiguous_list_allocator::ContiguousListAllocator;
 ///
-/// let allocator = ContiguousListAllocator::new();
+/// let allocator = ContiguousListAllocator::default();
 /// let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
 /// chunk[0] = 1;
 /// ```
@@ -226,28 +225,16 @@ where
     phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, A> ContiguousListAllocator<'a, A>
-where
-    A: PageAllocator + Newable,
-{
-    /// Creates a new contiguous list allocator
-    /// Manually allocates its own page_allocator (not recommended )
-    ///
-    /// # Safety
-    /// Panics if:
-    /// - The first page cannot be allocated
-    ///
-    /// # Usage
-    /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator};
-    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
-    /// ```
-    pub fn new() -> Self {
-        let page_allocator = A::new(PAGE_SIZE);
-        Self::with_allocator(page_allocator)
-    }
-}
-
+// impl<'a, A> ContiguousListAllocator<'a, A>
+// where
+//     A: PageAllocator,
+// {
+//     pub fn new() -> Self {
+//         let page_allocator = A::new(PAGE_SIZE);
+//         Self::with_allocator(page_allocator)
+//     }
+// }
+//
 impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
@@ -486,15 +473,6 @@ impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     }
 }
 
-impl<'a, A> Default for ContiguousListAllocator<'a, A>
-where
-    A: PageAllocator + Newable,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn is_invalid_layout(&layout: &Layout) -> bool {
     let align = layout.align();
     let size = layout.size();
@@ -502,6 +480,50 @@ fn is_invalid_layout(&layout: &Layout) -> bool {
         || align < MIN_ALIGN
         || size < MIN_BLOCK_SIZE
         || size + size_of::<Header>() > MAX_BLOCK_SIZE
+}
+
+impl<'a, A> WithPageSize for ContiguousListAllocator<'a, A>
+where
+    A: PageAllocator + WithPageSize,
+{
+    /// Creates a new contiguous list allocator
+    /// Manually allocates its own page_allocator with a given page size (not recommended)
+    ///
+    /// # Safety
+    /// Panics if:
+    /// - The first page cannot be allocated
+    ///
+    /// # Usage
+    /// ```rust
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator, with_page_size::WithPageSize};
+    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::with_page_size(4096);
+    /// ```
+    fn with_page_size(page_size: usize) -> Self {
+        let allocator = A::with_page_size(page_size);
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<'a, A> Default for ContiguousListAllocator<'a, A>
+where
+    A: PageAllocator + WithPageSize,
+{
+    /// Creates a new contiguous list allocator
+    /// Manually allocates its own page_allocator using the default page size (not recommended )
+    ///
+    /// # Safety
+    /// Panics if:
+    /// - The first page cannot be allocated
+    ///
+    /// # Usage
+    /// ```rust
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator};
+    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
+    /// ```
+
+    fn default() -> Self {
+        Self::with_page_size(PAGE_SIZE)
+    }
 }
 
 unsafe impl<'a, A> Allocator for ContiguousListAllocator<'a, A>
@@ -645,7 +667,7 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -664,7 +686,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
@@ -678,7 +700,7 @@ mod test {
 
     #[test]
     fn zeroed() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -697,7 +719,7 @@ mod test {
 
     #[test]
     fn realloc() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
         let layout = Layout::new::<[u8; 16]>();
         let new_layout = Layout::new::<[u8; 32]>();
 
@@ -713,7 +735,7 @@ mod test {
 
     #[test]
     fn merge() {
-        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::new();
+        let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 
@@ -745,7 +767,7 @@ mod test {
 
     #[test]
     fn with_box() {
-        let allocator = ContiguousListAllocator::new();
+        let allocator = ContiguousListAllocator::default();
         let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
         chunk[0] = 1;
     }
