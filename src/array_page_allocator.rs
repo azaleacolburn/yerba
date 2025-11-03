@@ -49,11 +49,23 @@ impl PageArray {
         }
     }
 
-    fn set_loaned_page_count(&mut self, n: impl Into<usize>) {
+    fn _set_loaned_page_count(&mut self, n: impl Into<usize>) {
         self.pages_allocated = n.into();
     }
 
-    fn decrement_loaned_page_count(&mut self) {
+    fn _decrement_loaned_page_count(&mut self) {
+        self.pages_allocated -= 1;
+    }
+
+    fn increment_loaned_page_count(&mut self) {
+        self.pages_allocated += 1;
+    }
+
+    fn _set_allocated_page_count(&mut self, n: impl Into<usize>) {
+        self.pages_allocated = n.into();
+    }
+
+    fn decrement_allocated_page_count(&mut self) {
         self.pages_allocated -= 1;
     }
 
@@ -165,7 +177,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         match map_fixed(last_page_addr, page_size) {
             Ok(page_ptr) => {
                 curr_page_array.pages_loaned += 1;
-                curr_page_array.pages_allocated += 1;
+                curr_page_array.increment_allocated_page_count();
 
                 page_ptr.cast()
             }
@@ -223,7 +235,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
                 // our stack version of page_array in stack memory
                 // even though we couldn't edit values of page_array on the heap
                 // using it
-                page_array.decrement_loaned_page_count();
+                page_array.decrement_allocated_page_count();
                 unsafe {
                     ptr.write_bytes(0, self.page_size);
                 }

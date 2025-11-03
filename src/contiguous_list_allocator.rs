@@ -574,6 +574,7 @@ where
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let new_size = new_layout.size();
+
         // First look forward for adjacent free blocks
         let mut header_ptr = self.find_ptr_block(ptr).ok_or_else(|| AllocError)?;
         header_ptr.free();
@@ -603,6 +604,7 @@ where
             return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
         }
         let alignment_offset = header_ptr.align_offset(layout.align());
+
         // Then start at the first block and check for available adjacent blocks again
         let mut anchor_ptr = Some(self.first_block());
         while let Some(anchor) = anchor_ptr {
@@ -618,7 +620,6 @@ where
             {
                 if frontier.used() {
                     anchor_ptr = self.next_header(&frontier);
-                    // assert!(!anchor.is_null());
                     break;
                 }
 
@@ -641,6 +642,7 @@ where
             self.add_page(new_size)?;
 
             let header_ptr = frontier_ptr.unwrap();
+
             // Ideally they don't request more than a page
             while new_size > header_ptr.size() {
                 self.add_page(new_size)?;

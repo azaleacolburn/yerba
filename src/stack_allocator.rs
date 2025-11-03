@@ -17,7 +17,7 @@ const BUF_SIZE: usize = 4096 * 2;
 /// - You need blazingly fast LIFO allocations, in a loop, for instance
 /// ## Limitations
 /// - Fixed-size buffer, does not reserve more memory
-/// - LIFO
+/// - Can only perform LIFO allocations and deallocations
 /// - Cannot perform reallocations
 ///
 /// # Usage
@@ -45,12 +45,17 @@ const BUF_SIZE: usize = 4096 * 2;
 /// }
 /// ```
 /// ## With Rust structures
+///
 /// ```rust
 /// #![feature(allocator_api)]
 /// use yerba::stack_allocator::StackAllocator;
 /// use core::alloc::{Allocator, Layout};
 ///
+///
 /// let allocator = StackAllocator::new();
+/// // Be careful! This example works because objects are dropped in the [reverse order of
+/// // their declaration](https://doc.rust-lang.org/reference/destructors.html), so this example obeys
+/// // LIFO rules
 /// for i in 0..12 {
 ///     let mut one = Box::new_in([0; 16], &allocator);
 ///     let mut two = Box::new_in([0 as i32; 13], &allocator);
@@ -60,23 +65,17 @@ const BUF_SIZE: usize = 4096 * 2;
 ///     two[12] = 9;
 ///     three[4] = one.as_ptr().addr();
 ///
-///     // Gets dropped automatically
+///     // Gets dropped automatically in the correct order
 /// }
 /// ```
-///
-///
-///
-///
-///
-///
-///
-///
-///
-///
 ///
 /// # Notes
 /// - Future iterations (or future allocators) may be LIFO and allow buffer growth as well as
 /// custom initial buffer sizes
+///
+/// # Safety
+/// - Calling `StackAllocator::deallocate` in an out of order manner will not panic, it will cause
+/// a silent failure
 pub struct StackAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
     offset: *mut usize,
@@ -156,7 +155,6 @@ unsafe impl Allocator for StackAllocator {
         let size = layout.size();
         if !self.is_top(ptr, layout.size()) {
             return;
-            // panic!("Cannot deallocate block that is not on the top of the stack")
         }
 
         self.sub_offset(size);
