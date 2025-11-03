@@ -225,16 +225,6 @@ where
     phantom: PhantomData<&'a ()>,
 }
 
-// impl<'a, A> ContiguousListAllocator<'a, A>
-// where
-//     A: PageAllocator,
-// {
-//     pub fn new() -> Self {
-//         let page_allocator = A::new(PAGE_SIZE);
-//         Self::with_allocator(page_allocator)
-//     }
-// }
-//
 impl<'a, A: PageAllocator> ContiguousListAllocator<'a, A> {
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
