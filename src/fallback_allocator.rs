@@ -80,15 +80,13 @@ where
 mod test {
     use core::alloc::Layout;
 
-    use crate::{
-        contiguous_list_allocator::ContiguousListAllocator, stack_allocator::StackAllocator,
-    };
+    use crate::{inline_allocator::ListAllocator, stack_allocator::StackAllocator};
 
     use super::*;
 
     #[test]
     fn alloc_chunks() {
-        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -107,7 +105,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ListAllocator>::new();
         let layout = Layout::new::<[u8; 5000]>();
 
         unsafe {
@@ -121,7 +119,7 @@ mod test {
 
     #[test]
     fn zeroed() {
-        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
@@ -140,7 +138,7 @@ mod test {
 
     #[test]
     fn realloc() {
-        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ListAllocator>::new();
         let layout = Layout::new::<[u8; 16]>();
         let second_layout = Layout::new::<[u8; 32]>();
 
@@ -156,7 +154,7 @@ mod test {
 
     #[test]
     fn merge() {
-        let allocator = FallbackAllocator::<StackAllocator, ContiguousListAllocator>::new();
+        let allocator = FallbackAllocator::<StackAllocator, ListAllocator>::new();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 

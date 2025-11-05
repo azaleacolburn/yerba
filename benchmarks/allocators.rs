@@ -3,23 +3,21 @@ use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use yerba::{
-    array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator,
+    array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator,
     stack_allocator::StackAllocator,
 };
 
 pub fn contiguous_list_create(c: &mut Criterion) {
     c.bench_function("contiguous_list_create", |b| {
         b.iter(|| unsafe {
-            let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> =
-                ContiguousListAllocator::default();
+            let allocator: ListAllocator<'_, ArrayPageAllocator> = ListAllocator::default();
             black_box(&allocator);
         });
     });
 }
 
 pub fn contiguous_list_alloc(c: &mut Criterion) {
-    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> =
-        ContiguousListAllocator::default();
+    let allocator: ListAllocator<'_, ArrayPageAllocator> = ListAllocator::default();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_alloc", |b| {
         b.iter(|| unsafe {
@@ -30,8 +28,7 @@ pub fn contiguous_list_alloc(c: &mut Criterion) {
 }
 
 fn contiguous_list_free(c: &mut Criterion) {
-    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> =
-        ContiguousListAllocator::default();
+    let allocator: ListAllocator<'_, ArrayPageAllocator> = ListAllocator::default();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_free", |b| {
         b.iter_batched(
@@ -46,8 +43,7 @@ fn contiguous_list_free(c: &mut Criterion) {
 }
 
 fn contiguous_list_alloc_free(c: &mut Criterion) {
-    let allocator: ContiguousListAllocator<'_, ArrayPageAllocator> =
-        ContiguousListAllocator::default();
+    let allocator: ListAllocator<'_, ArrayPageAllocator> = ListAllocator::default();
     let layout = Layout::new::<[u8; 5000]>();
     c.bench_function("contiguous_list_alloc_free", |b| {
         b.iter(|| unsafe {
@@ -112,10 +108,10 @@ fn rust_box_alloc_free(c: &mut Criterion) {
 
 fn contiguous_allocator_box_alloc_free(c: &mut Criterion) {
     c.bench_function("contiguous_allocator_box_alloc_free", |b| {
-        let allocator = ContiguousListAllocator::default();
+        let allocator = ListAllocator::default();
         let layout = Layout::new::<[u8; 5000]>();
         b.iter(|| {
-            let mut b = Box::<[u8; 5000], &ContiguousListAllocator>::new_in([0; 5000], &allocator);
+            let mut b = Box::<[u8; 5000], &ListAllocator>::new_in([0; 5000], &allocator);
             black_box(&b);
         });
     });
