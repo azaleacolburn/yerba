@@ -1,13 +1,17 @@
 use core::ops::Deref;
 use core::ptr::NonNull;
+use std::alloc::Layout;
+
+use crate::page_allocator::PageAllocator;
 
 /// A structure represented a pointer to a header which represents a single block of memory
 // NOTE u8 is just a placehoelder, it just needs to be a pointer
-pub trait InlineHeader<Header>
+pub trait InlineHeader
 where
-    Self: From<NonNull<Header>> + Deref<Target = NonNull<Header>> + Clone + Copy,
-    Header: Clone + Copy,
+    Self: From<NonNull<Self::Header>> + Deref<Target = NonNull<Self::Header>> + Clone + Copy,
 {
+    type Header;
+
     fn new<T: ?Sized>(ptr: *mut T) -> Self;
 
     /// Gets the offset of the memory in the block represented by this header
@@ -42,7 +46,7 @@ where
     // pub fn set(&mut self, ptr: &HeaderPtr);
 
     /// Gets the underlying block represented by the header
-    fn get_data(&self) -> *mut u8;
+    fn get_data(&self) -> NonNull<u8>;
     /// Gets the last address in the block represented by this header
     fn last_addr(&self) -> usize;
 
@@ -51,6 +55,34 @@ where
 
     /// Merges two consecutive memory blocks in the buffer
     fn merge_block(&mut self, last_header: &mut Self, required_size: usize, align: usize) -> bool;
+
+    /// Attempts to split the allocated block represented
+    /// by `header`, into two blocks, the first one of size `new_size`
+    ///
+    /// Does nothing if there isn't enough space to split the block
+    /// Or if `new_size > header.size() + size_of::<Header>()`
+    fn try_split_allocated_block(&mut self, new_size: usize, last_addr: usize);
+    fn can_split_allocated_block(
+        &self,
+        next_header: &Self,
+        new_size: usize,
+        last_addr: usize,
+    ) -> bool;
+
+    /// Allocates a new buffer of size `size` using the given `page_allocator`
+    /// then writes a base header to it the buffer
+    /// The header will represent the entire allocated buffer
+    /// and so will be of size `page_allocator.get_page_size()`
+    /// Returns a pointer to that buffer
+    fn initialize_header(page_allocator: impl PageAllocator) -> *mut Self::Header;
+
+    /// Returns whether a given layout is valid to by represented by a header of this type
+    /// For example, the layout size plus the header size may exceed the maximum layout size specificed by Yerba
+    fn is_invalid_layout(layout: &Layout) -> bool;
+
+    fn header_size() -> usize {
+        size_of::<Self::Header>()
+    }
 }
 
 // impl Deref for T

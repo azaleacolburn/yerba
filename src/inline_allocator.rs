@@ -2,41 +2,14 @@ use crate::array_page_allocator::ArrayPageAllocator;
 use crate::contiguous_header::ContiguousHeader;
 use crate::inline_header::InlineHeader;
 use crate::page_allocator::PageAllocator;
-use crate::util::{
-    MAX_ALIGN, MAX_BLOCK_SIZE, MIN_ALIGN, MIN_BLOCK_SIZE, PAGE_SIZE, to_non_null_slice,
-};
-use crate::with_page_size::{WithPageSize, WithSize};
+use crate::util::PAGE_SIZE;
+use crate::with_page_size::WithPageSize;
 use core::alloc::{AllocError, Allocator, Layout};
 use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 
-/// Represents a memory block
-/// The most significant bit of the offset is used to mark whether the block is used
-/// Thus you should never access offset field directly, instead, use the provided API
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-struct Header {
-    size: usize,
-    offset: usize,
-}
-
-impl Default for Header {
-    fn default() -> Self {
-        Header::with_size(PAGE_SIZE - size_of::<Header>())
-    }
-}
-
-impl WithSize for Header {
-    fn with_size(size: usize) -> Header {
-        Header { size, offset: 0 }
-    }
-
-    fn with_offset(size: usize, offset: usize) -> Header {
-        Header { size, offset }
-    }
-}
 // Headers are inlined to the buffer
 // Only allocates a single arena and returns a null pointer for allocations past that
 // Allows the arbitrary allocation, deallocation, and reallocation of any block
@@ -68,10 +41,10 @@ impl WithSize for Header {
 /// ## Direct Allocation
 /// ```rust
 /// #![feature(allocator_api)]
-/// use yerba::{contiguous_list_allocator::ContiguousListAllocator, array_page_allocator::ArrayPageAllocator};
+/// use yerba::{inline_allocator::ListAllocator, array_page_allocator::ArrayPageAllocator};
 /// use core::alloc::{Allocator, Layout};
 ///
-/// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
+/// let allocator = ListAllocator::<ArrayPageAllocator>::default();
 /// let layout = Layout::new::<[u8; 16]>();
 ///
 /// unsafe {
@@ -84,56 +57,38 @@ impl WithSize for Header {
 /// ## Use in a structure
 /// ```rust
 /// #![feature(allocator_api)]
-/// use yerba::contiguous_list_allocator::ContiguousListAllocator;
+/// use yerba::inline_allocator::ListAllocator;
 ///
-/// let allocator = ContiguousListAllocator::default();
-/// let mut chunk = Box::<[u8; 16], ContiguousListAllocator>::new_in([0; 16], allocator);
+/// let allocator = ListAllocator::default();
+/// let mut chunk = Box::<[u8; 16], ListAllocator>::new_in([0; 16], allocator);
 /// chunk[0] = 1;
 /// ```
 ///
 ///
 /// This isn't valid
-pub struct ListAllocator<'a, A = ArrayPageAllocator<'a>, G = Header>, H = ContiguousHeader<G>>
+pub struct ListAllocator<'a, A = ArrayPageAllocator<'a>, H = ContiguousHeader>
 where
     A: PageAllocator,
-    H: InlineHeader<G>,
-    G: WithSize + Clone + Copy,
+    H: InlineHeader,
 {
     buf: *mut UnsafeCell<[u8]>,
     page_allocator: RefCell<A>,
-    phantom: PhantomData<&'a (H, G)>,
+    phantom: PhantomData<&'a H>,
 }
 
-impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
-    ListAllocator<'a, A, H, G>
-{
+impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
     /// # Safety
     /// Panics if:
     /// - The first page cannot be allocated
     pub fn with_allocator(mut page_allocator: A) -> Self {
-        const {
-            let header_size = size_of::<Header>();
-            assert!(header_size < PAGE_SIZE);
-            assert!(header_size % 8 == 0)
-        }
+        let first_block = H::initialize_header(&mut page_allocator);
 
-        let first_page_ptr = unsafe { page_allocator.request_page_zeroed() };
-        if first_page_ptr.is_null() {
-            panic!("Failed to allocate the first page");
-        }
-
-        let first_page_buf =
-            slice_from_raw_parts_mut(first_page_ptr, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
-
-        let head = Header::default();
-        unsafe {
-            first_page_buf.cast::<Header>().write(head);
-        }
+        let buf = slice_from_raw_parts_mut(first_block, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
 
         Self {
-            buf: first_page_buf,
+            buf,
             page_allocator: RefCell::new(page_allocator),
             phantom: PhantomData,
         }
@@ -174,7 +129,7 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
             }
 
             header.set_size(initial_header_size + PAGE_SIZE);
-            self.try_split_allocated_block(&mut header, size);
+            header.try_split_allocated_block(size, self.last_addr());
 
             let allocated_space = self.last_addr() - self.buf_ptr().addr();
             assert_eq!(2 * PAGE_SIZE, allocated_space);
@@ -225,6 +180,7 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
 
                 continue;
             }
+            println!("h");
 
             // We don't actually use this pointer again, it's just for calculating the offset
             let data_ptr = unsafe { header_ptr.add(1).cast::<u8>() };
@@ -232,6 +188,7 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
             if alignment_offset == usize::MAX {
                 return Err(AllocError);
             }
+            println!("h1");
 
             let required_size = size + alignment_offset;
             let fits = header_ptr.size() >= required_size;
@@ -242,6 +199,7 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
 
                 break;
             }
+            println!("h2");
 
             // We've found a pair of free blocks that can be merged to fit
             if let Some(mut last_header_ptr) = last_header_ptr
@@ -273,7 +231,9 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
     }
 
     fn first_block(&self) -> H {
-        H::new(self.buf_ptr())
+        let t = H::new(self.buf_ptr());
+        println!("{:?}", t.get_data());
+        t
     }
 
     fn last_addr(&self) -> usize {
@@ -290,7 +250,7 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
     fn find_ptr_block(&self, ptr: NonNull<u8>) -> Option<H> {
         let mut maybe_block = Some(self.first_block());
         while let Some(block) = maybe_block
-            && block.get_data() != ptr.as_ptr()
+            && block.get_data() != ptr
         {
             let next = &self.next_header(&block);
             maybe_block = *next;
@@ -309,43 +269,6 @@ impl<'a, A: PageAllocator, H: InlineHeader<G>, G: WithSize + Clone + Copy>
 
         c
     }
-
-    /// Attempts to split the allocated block represented
-    /// by `header`, into two blocks, the first one of size `new_size`
-    ///
-    /// Does nothing if there isn't enough space to split the block
-    /// Or if `new_size > header.size() + size_of::<Header>()`
-    fn try_split_allocated_block(&self, header: &mut H, new_size: usize) {
-        let next_header = unsafe { header.next_unchecked() };
-        if !self.can_split_allocated_block(&header, &next_header, new_size) {
-            return;
-        }
-
-        let second_block_size = header.size() - size_of::<Header>() - new_size;
-        header.set_size(new_size);
-
-        let new_header = G::with_size(second_block_size);
-        unsafe {
-            next_header.write(new_header);
-        }
-    }
-
-    fn can_split_allocated_block(&self, header: &H, next_header: &H, new_size: usize) -> bool {
-        let space_for_new_block = header.size() > size_of::<Header>() + new_size;
-        let within_buffer =
-            (usize::from(next_header.addr()) + size_of::<Header>()) < self.last_addr();
-
-        space_for_new_block && within_buffer
-    }
-}
-
-fn is_invalid_layout(&layout: &Layout) -> bool {
-    let align = layout.align();
-    let size = layout.size();
-    align > MAX_ALIGN
-        || align < MIN_ALIGN
-        || size < MIN_BLOCK_SIZE
-        || size + size_of::<Header>() > MAX_BLOCK_SIZE
 }
 
 impl<'a, A> WithPageSize for ListAllocator<'a, A>
@@ -361,8 +284,8 @@ where
     ///
     /// # Usage
     /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator, with_page_size::WithPageSize};
-    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::with_page_size(4096);
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator, with_page_size::WithPageSize};
+    /// let allocator = ListAllocator::<ArrayPageAllocator>::with_page_size(4096);
     /// ```
     fn with_page_size(page_size: usize) -> Self {
         let allocator = A::with_page_size(page_size);
@@ -383,8 +306,8 @@ where
     ///
     /// # Usage
     /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, contiguous_list_allocator::ContiguousListAllocator};
-    /// let allocator = ContiguousListAllocator::<ArrayPageAllocator>::default();
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator};
+    /// let allocator = ListAllocator::<ArrayPageAllocator>::default();
     /// ```
 
     fn default() -> Self {
@@ -392,17 +315,16 @@ where
     }
 }
 
-unsafe impl<'a, A, H, G> Allocator for ListAllocator<'a, A, H, G>
+unsafe impl<'a, A, H> Allocator for ListAllocator<'a, A, H>
 where
     A: PageAllocator,
-    H: InlineHeader<G>,
-    G: WithSize + Clone + Copy,
+    H: InlineHeader,
 {
     /// Allocates a new block with capacity `size` in the allocator
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
     /// and a pointer to the first of the headers will be returned
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if is_invalid_layout(&layout) {
+        if H::is_invalid_layout(&layout) {
             return Err(AllocError);
         }
 
@@ -410,18 +332,20 @@ where
         let align = layout.align();
 
         let mut header = self.find_empty_block(size, align)?;
+        println!("here");
         let data_ptr = header.get_data();
 
-        let end_of_block = data_ptr.addr() + size;
+        let end_of_block = data_ptr.as_ptr().addr() + size;
         let top_of_buf = self.last_addr();
         if end_of_block > top_of_buf {
             return Err(AllocError);
         }
+        println!("here1");
 
         header.mark_used();
-        self.try_split_allocated_block(&mut header, size);
+        header.try_split_allocated_block(size, self.last_addr());
 
-        Ok(to_non_null_slice(data_ptr, size)?)
+        Ok(NonNull::slice_from_raw_parts(data_ptr, size))
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {
@@ -455,15 +379,15 @@ where
                 break;
             }
 
-            acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
+            acc_size += frontier.size() + frontier.get_offset() + H::header_size();
             if acc_size >= new_size {
                 let alignment_offset = header_ptr.align_offset(layout.align());
                 unsafe {
                     header_ptr.set_offset(alignment_offset);
-                    return Ok(to_non_null_slice(
+                    return Ok(NonNull::slice_from_raw_parts(
                         header_ptr.get_data().add(alignment_offset),
                         new_size,
-                    )?);
+                    ));
                 }
             }
             unsafe { frontier_ptr = Some(H::from(frontier.add(1))) };
@@ -491,15 +415,15 @@ where
                     break;
                 }
 
-                acc_size += frontier.size() + frontier.get_offset() + size_of::<Header>();
+                acc_size += frontier.size() + frontier.get_offset() + H::header_size();
 
                 if acc_size >= new_size {
                     unsafe {
                         header_ptr.set_offset(alignment_offset);
-                        return to_non_null_slice(
+                        return Ok(NonNull::slice_from_raw_parts(
                             header_ptr.get_data().add(alignment_offset),
                             new_size,
-                        );
+                        ));
                     }
                 }
                 unsafe { frontier_ptr = Some(H::from(frontier.add(1))) };
@@ -514,13 +438,14 @@ where
             // Ideally they don't request more than a page
             while new_size > header_ptr.size() {
                 self.add_page(new_size)?;
-                header_ptr.write_bytes(0, size_of::<Header>());
+                header_ptr.write_bytes(0, H::header_size());
             }
         }
 
         let data_ptr = header_ptr.get_data();
         let alignment_offset = data_ptr.align_offset(layout.align());
-        let data_ptr = unsafe { to_non_null_slice(data_ptr.add(alignment_offset), new_size)? };
+        let data_ptr =
+            unsafe { NonNull::slice_from_raw_parts(data_ptr.add(alignment_offset), new_size) };
 
         if new_size + alignment_offset > header_ptr.size() {
             return Err(AllocError);
@@ -538,11 +463,14 @@ mod test {
     #[test]
     fn alloc_chunks() {
         let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        println!("past creation");
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
             let chunk = allocator.allocate(layout).unwrap();
+            println!("past alloc 1");
             allocator.deallocate(chunk.cast(), layout);
+            println!("past dealloc 1");
 
             let one = allocator.allocate(layout).unwrap().cast();
             let two = allocator.allocate(layout).unwrap().cast();

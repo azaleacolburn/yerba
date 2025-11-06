@@ -1,44 +1,49 @@
 use core::ptr::NonNull;
-use std::{marker::PhantomData, ops::Deref};
+use std::{alloc::Layout, ops::Deref};
 
-use crate::{inline_header::InlineHeader, util::PAGE_SIZE};
+use crate::{
+    inline_header::InlineHeader,
+    util::{MAX_ALIGN, MAX_BLOCK_SIZE, MIN_ALIGN, MIN_BLOCK_SIZE, PAGE_SIZE},
+};
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
 /// Thus you should never access offset field directly, instead, use the provided API
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-struct Header {
+pub struct UnderlyingHeader {
     size: usize,
     offset: usize,
 }
 
-impl Default for Header {
+impl Default for UnderlyingHeader {
     fn default() -> Self {
-        Header::new(PAGE_SIZE - size_of::<Header>())
+        UnderlyingHeader::with_size(PAGE_SIZE - size_of::<UnderlyingHeader>())
     }
 }
 
-impl Header {
-    pub fn new(size: usize) -> Header {
-        Header { size, offset: 0 }
+impl UnderlyingHeader {
+    pub fn with_size(size: usize) -> UnderlyingHeader {
+        UnderlyingHeader { size, offset: 0 }
     }
 
-    pub fn with_offset(size: usize, offset: usize) -> Header {
-        Header { size, offset }
+    pub fn with_offset(size: usize, offset: usize) -> UnderlyingHeader {
+        UnderlyingHeader { size, offset }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ContiguousHeader<G>(NonNull<Header>, PhantomData<G>);
+pub struct ContiguousHeader(NonNull<UnderlyingHeader>);
 
-impl InlineHeader<Header> for ContiguousHeader<Header> {
+impl InlineHeader for ContiguousHeader {
+    type Header = UnderlyingHeader;
+
     fn new<T: ?Sized>(ptr: *mut T) -> Self {
         if ptr.is_null() {
             panic!("Tried to create HeaderPtr from null ptr, use HeaderPtr::null() instead")
         }
         let non_null = unsafe { NonNull::new_unchecked(ptr.cast()) };
-        Self(non_null, PhantomData)
+        Self(non_null)
     }
 
     fn get_offset(&self) -> usize {
@@ -83,18 +88,25 @@ impl InlineHeader<Header> for ContiguousHeader<Header> {
         self.0 = ptr.0
     }
 
-    fn get_data(&self) -> *mut u8 {
+    fn get_data(&self) -> NonNull<u8> {
         let offset = self.get_offset();
-        unsafe { self.add(1).byte_add(offset).cast::<u8>().as_ptr() }
+        println!("offset: {:?}", offset);
+        println!("ptr: {:?}", self.0);
+        println!("{:?}", unsafe {
+            self.0.add(1).byte_add(offset).cast::<u8>().as_ptr()
+        });
+        let t = unsafe { self.0.add(1).byte_add(offset).cast::<u8>() };
+        println!("offset: {:?}", self);
+        t
     }
 
     fn last_addr(&self) -> usize {
-        usize::from(self.addr()) + size_of::<Header>() + self.get_offset() + self.size()
+        usize::from(self.addr()) + size_of::<UnderlyingHeader>() + self.get_offset() + self.size()
     }
 
-    unsafe fn next_unchecked(&self) -> ContiguousHeader<Header> {
+    unsafe fn next_unchecked(&self) -> ContiguousHeader {
         unsafe {
-            self.byte_add(size_of::<Header>() + self.get_offset() + self.size())
+            self.byte_add(size_of::<UnderlyingHeader>() + self.get_offset() + self.size())
                 .into()
         }
     }
@@ -102,7 +114,7 @@ impl InlineHeader<Header> for ContiguousHeader<Header> {
     /// Merges two consecutive memory blocks in the buffer
     fn merge_block(
         &mut self,
-        last_header: &mut ContiguousHeader<Header>,
+        last_header: &mut ContiguousHeader,
         required_size: usize,
         align: usize,
     ) -> bool {
@@ -117,27 +129,95 @@ impl InlineHeader<Header> for ContiguousHeader<Header> {
             }
 
             last_header.set_offset(alignment_offset);
-            last_header.add_size(self.size() + self.get_offset() + size_of::<Header>());
+            last_header.add_size(self.size() + self.get_offset() + size_of::<UnderlyingHeader>());
 
             unsafe {
-                self.write_bytes(0, size_of::<Header>());
+                self.write_bytes(0, size_of::<UnderlyingHeader>());
             }
             self.set(*last_header);
         }
 
         true
     }
-}
 
-impl Deref for ContiguousHeader<Header> {
-    type Target = NonNull<Header>;
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.0.cast().read() }
+    /// Attempts to split the allocated block represented
+    /// by `header`, into two blocks, the first one of size `new_size`
+    ///
+    /// Does nothing if there isn't enough space to split the block
+    /// Or if `new_size > header.size() + size_of::<Header>()`
+    fn try_split_allocated_block(&mut self, new_size: usize, last_addr: usize) {
+        let next_header = unsafe { self.next_unchecked() };
+        if !self.can_split_allocated_block(&next_header, new_size, last_addr) {
+            return;
+        }
+
+        let second_block_size = self.size() - size_of::<UnderlyingHeader>() - new_size;
+        self.set_size(new_size);
+
+        let new_header = UnderlyingHeader::with_size(second_block_size);
+        unsafe {
+            next_header.write(new_header);
+        }
+    }
+
+    fn can_split_allocated_block(
+        &self,
+        next_header: &Self,
+        new_size: usize,
+        last_addr: usize,
+    ) -> bool {
+        let space_for_new_block = self.size() > size_of::<UnderlyingHeader>() + new_size;
+        let within_buffer =
+            (usize::from(next_header.addr()) + size_of::<UnderlyingHeader>()) < last_addr;
+
+        space_for_new_block && within_buffer
+    }
+
+    fn initialize_header(
+        mut page_allocator: impl crate::page_allocator::PageAllocator,
+    ) -> *mut Self::Header {
+        const {
+            let header_size = size_of::<UnderlyingHeader>();
+            assert!(header_size < PAGE_SIZE);
+            assert!(header_size % 8 == 0)
+        }
+
+        let page_ptr = unsafe {
+            page_allocator
+                .request_page_zeroed()
+                .cast::<UnderlyingHeader>()
+        };
+        if page_ptr.is_null() {
+            panic!("Failed to allocate the first page");
+        }
+
+        let head = UnderlyingHeader::with_size(page_allocator.get_page_size());
+        unsafe {
+            page_ptr.write(head);
+        }
+
+        page_ptr
+    }
+
+    fn is_invalid_layout(&layout: &Layout) -> bool {
+        let align = layout.align();
+        let size = layout.size();
+        align > MAX_ALIGN
+            || align < MIN_ALIGN
+            || size < MIN_BLOCK_SIZE
+            || size + size_of::<Self::Header>() > MAX_BLOCK_SIZE
     }
 }
 
-impl From<NonNull<Header>> for ContiguousHeader<Header> {
-    fn from(value: NonNull<Header>) -> Self {
+impl Deref for ContiguousHeader {
+    type Target = NonNull<UnderlyingHeader>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<NonNull<UnderlyingHeader>> for ContiguousHeader {
+    fn from(value: NonNull<UnderlyingHeader>) -> Self {
         ContiguousHeader::new(value.as_ptr())
     }
 }
