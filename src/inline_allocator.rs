@@ -10,32 +10,22 @@ use core::marker::PhantomData;
 use core::ptr::NonNull;
 use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 
-// Headers are inlined to the buffer
-// Only allocates a single arena and returns a null pointer for allocations past that
-// Allows the arbitrary allocation, deallocation, and reallocation of any block
-// Will merge empty blocks when necessary to fit new allocations
-//
 // NOTE Explicitly dropping is not important because
 // all the underlying memory is deallocated by the page allocator
-//
-/// An allocator in the shape of a single contiguous buffer, capable of performing allocations, deallocations, and reallocations.
-/// It automatically merges and splits free block when suitable.
+
+/// A general alloctor where headers to memory blocks are inlined to the buffer
+/// Functionality can depend widely on which `InlineHeader` is used
+/// The generic header struct controls:
+/// - How the next header is accessed
+/// - How new memory blocks are allocated
+/// - How/if blocks can be merged and split
 ///
 /// # Use Cases
-/// This is a versatile allocator with few limitations
-/// ## Especially suitable for
-/// - Lots of small-midsized allocations/reallocations
-/// - Single threaded code
+/// This is a versatile, single-threaded allocator with few limitations
+/// The exact suitability depends on the `InlineHeader`
 ///
 /// ## Limitations
-/// - Fails to allocate/reallocate if there isn't enough space in the underlying buffer and the system call to
-/// request more contiguous memory fails.
-/// - Not suitable for large allocations/reallocations or multithreaded code
-///
-/// While plugging in a custom `PageAllocator` is possible, it is not recommended to use one that
-/// plans to allocate more than one contiguous page, as this allocator could not utilize it fully.
-/// This, of course, is not the case if you pass in a specific instance of a `PageAllocator` with
-/// `ContiguousListAllocator::with_allocator`
+/// - Depends on the `InlineHeader` chosen
 ///
 /// # Usage
 /// ## Direct Allocation

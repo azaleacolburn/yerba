@@ -32,6 +32,26 @@ impl UnderlyingHeader {
     }
 }
 
+// Only allocates a single arena and returns a null pointer for allocations past that
+// Allows the arbitrary allocation, deallocation, and reallocation of any block
+/// Will merge empty blocks when necessary to fit new allocations
+///
+/// Used to create an allocator in the shape of a single contiguous buffer, capable of performing allocations, deallocations, and reallocations.
+/// It automatically merges and splits free block when suitable.
+///
+/// While plugging in a custom `PageAllocator` to the parent `ListAllocator` is possible
+/// it is not recommended to use one that plans to allocate more than one contiguous page
+/// as this allocator could not utilize it fully.
+/// This, of course, is not the case if you pass in a specific instance of a `PageAllocator` with
+/// `ListALlocator::with_allocator`
+///
+///# Especially suitable for
+/// - Lots of small-midsized allocations/reallocations
+///
+/// # Limitations
+/// - Fails to allocate/reallocate if there isn't enough space in the underlying buffer and the system call to
+/// request more contiguous memory fails.
+/// - Not suitable for large allocations/reallocations or multithreaded code//
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContiguousHeader(NonNull<UnderlyingHeader>);
 
