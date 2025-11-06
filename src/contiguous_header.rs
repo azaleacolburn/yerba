@@ -110,20 +110,14 @@ impl InlineHeader for ContiguousHeader {
 
     fn get_data(&self) -> NonNull<u8> {
         let offset = self.get_offset();
-        println!("offset: {:?}", offset);
-        println!("ptr: {:?}", self.0);
-        println!("{:?}", unsafe {
-            self.0.add(1).byte_add(offset).cast::<u8>().as_ptr()
-        });
-        let t = unsafe { self.0.add(1).byte_add(offset).cast::<u8>() };
-        println!("offset: {:?}", self);
-        t
+        unsafe { self.0.add(1).byte_add(offset).cast::<u8>() }
     }
 
     fn last_addr(&self) -> usize {
         usize::from(self.addr()) + size_of::<UnderlyingHeader>() + self.get_offset() + self.size()
     }
 
+    #[inline]
     unsafe fn next_unchecked(&self) -> ContiguousHeader {
         unsafe {
             self.byte_add(size_of::<UnderlyingHeader>() + self.get_offset() + self.size())
@@ -180,6 +174,7 @@ impl InlineHeader for ContiguousHeader {
         }
     }
 
+    #[inline]
     fn can_split_allocated_block(
         &self,
         next_header: &Self,
@@ -219,6 +214,7 @@ impl InlineHeader for ContiguousHeader {
         page_ptr
     }
 
+    #[inline]
     fn is_invalid_layout(&layout: &Layout) -> bool {
         let align = layout.align();
         let size = layout.size();

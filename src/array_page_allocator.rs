@@ -183,7 +183,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
             }
 
             Err(_) => {
-                println!("failed to allocate page");
                 let new_base_page = match map_arbitrary(self.page_size * 12) {
                     Ok(ptr) => ptr,
                     Err(_) => return ptr::null_mut(),

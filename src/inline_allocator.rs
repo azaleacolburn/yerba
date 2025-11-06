@@ -170,7 +170,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
 
                 continue;
             }
-            println!("h");
 
             // We don't actually use this pointer again, it's just for calculating the offset
             let data_ptr = unsafe { header_ptr.add(1).cast::<u8>() };
@@ -178,7 +177,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
             if alignment_offset == usize::MAX {
                 return Err(AllocError);
             }
-            println!("h1");
 
             let required_size = size + alignment_offset;
             let fits = header_ptr.size() >= required_size;
@@ -189,7 +187,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
 
                 break;
             }
-            println!("h2");
 
             // We've found a pair of free blocks that can be merged to fit
             if let Some(mut last_header_ptr) = last_header_ptr
@@ -220,17 +217,18 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
         curr_header_ptr.ok_or_else(|| AllocError)
     }
 
+    #[inline]
     fn first_block(&self) -> H {
-        let t = H::new(self.buf_ptr());
-        println!("{:?}", t.get_data());
-        t
+        H::new(self.buf_ptr())
     }
 
+    #[inline]
     fn last_addr(&self) -> usize {
         let pages = self.page_allocator.borrow().get_pages_allocated();
         self.buf_ptr().wrapping_add(PAGE_SIZE * pages).addr()
     }
 
+    #[inline]
     fn buf_ptr(&self) -> *mut u8 {
         unsafe { (*self.buf).get().cast() }
     }
@@ -322,7 +320,6 @@ where
         let align = layout.align();
 
         let mut header = self.find_empty_block(size, align)?;
-        println!("here");
         let data_ptr = header.get_data();
 
         let end_of_block = data_ptr.as_ptr().addr() + size;
@@ -330,7 +327,6 @@ where
         if end_of_block > top_of_buf {
             return Err(AllocError);
         }
-        println!("here1");
 
         header.mark_used();
         header.try_split_allocated_block(size, self.last_addr());
@@ -453,14 +449,11 @@ mod test {
     #[test]
     fn alloc_chunks() {
         let allocator = ListAllocator::<ArrayPageAllocator>::default();
-        println!("past creation");
         let layout = Layout::new::<[u8; 16]>();
 
         unsafe {
             let chunk = allocator.allocate(layout).unwrap();
-            println!("past alloc 1");
             allocator.deallocate(chunk.cast(), layout);
-            println!("past dealloc 1");
 
             let one = allocator.allocate(layout).unwrap().cast();
             let two = allocator.allocate(layout).unwrap().cast();

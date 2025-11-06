@@ -19,6 +19,7 @@ pub fn contiguous_list_create(c: &mut Criterion) {
 pub fn contiguous_list_alloc(c: &mut Criterion) {
     let allocator: ListAllocator<'_, ArrayPageAllocator> = ListAllocator::default();
     let layout = Layout::new::<[u8; 5000]>();
+    // Ideally this works and all the memory gets freed
     c.bench_function("contiguous_list_alloc", |b| {
         b.iter(|| unsafe {
             let chunk: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
@@ -34,8 +35,7 @@ fn contiguous_list_free(c: &mut Criterion) {
         b.iter_batched(
             || unsafe { allocator.allocate(layout).unwrap().cast() },
             |chunk: NonNull<u8>| unsafe {
-                black_box(chunk);
-                allocator.deallocate(chunk.cast(), layout);
+                allocator.deallocate(black_box(chunk.cast()), layout);
             },
             BatchSize::SmallInput,
         );
@@ -76,6 +76,24 @@ fn stack_alloc(c: &mut Criterion) {
     });
 }
 
+fn stack_free(c: &mut Criterion) {
+    let allocator = StackAllocator::default();
+    let layout = Layout::new::<[u8; 5000]>();
+
+    c.bench_function("stack_free", |b| {
+        b.iter_batched(
+            || unsafe {
+                let t: NonNull<u8> = black_box(allocator.allocate(layout).unwrap().cast());
+                t
+            },
+            |t| unsafe {
+                allocator.deallocate(t.cast(), layout);
+            },
+            BatchSize::PerIteration,
+        )
+    });
+}
+
 fn c_malloc_free(c: &mut Criterion) {
     c.bench_function("c_malloc_free", |b| {
         b.iter(|| unsafe {
@@ -88,11 +106,11 @@ fn c_malloc_free(c: &mut Criterion) {
 fn c_free(c: &mut Criterion) {
     c.bench_function("c_free", |b| {
         b.iter_batched(
-            || unsafe { libc::malloc(5000) },
+            || unsafe { black_box(libc::malloc(5000)) },
             |chunk| unsafe {
-                libc::free(black_box(chunk));
+                libc::free(chunk);
             },
-            BatchSize::SmallInput,
+            BatchSize::PerIteration,
         );
     });
 }
@@ -124,6 +142,7 @@ criterion_group!(
     contiguous_list_free,
     contiguous_list_alloc_free,
     stack_create,
+    stack_free,
     stack_alloc,
     c_malloc_free,
     c_free,
