@@ -3,7 +3,7 @@ use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use yerba::{
-    array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator,
+    array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator,
     stack_allocator::StackAllocator,
 };
 

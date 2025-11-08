@@ -1,34 +1,33 @@
-use core::ptr::NonNull;
-use std::{alloc::Layout, ops::Deref};
-
 use crate::{
     inline_header::InlineHeader,
     util::{MAX_ALIGN, MAX_BLOCK_SIZE, MIN_ALIGN, MIN_BLOCK_SIZE, PAGE_SIZE},
 };
+use core::ptr::NonNull;
+use core::{alloc::Layout, ops::Deref};
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
 /// Thus you should never access offset field directly, instead, use the provided API
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct UnderlyingHeader {
+pub struct UnderlyingContiguousHeader {
     size: usize,
     offset: usize,
 }
 
-impl Default for UnderlyingHeader {
+impl Default for UnderlyingContiguousHeader {
     fn default() -> Self {
-        UnderlyingHeader::with_size(PAGE_SIZE - size_of::<UnderlyingHeader>())
+        UnderlyingContiguousHeader::with_size(PAGE_SIZE - size_of::<UnderlyingContiguousHeader>())
     }
 }
 
-impl UnderlyingHeader {
-    pub fn with_size(size: usize) -> UnderlyingHeader {
-        UnderlyingHeader { size, offset: 0 }
+impl UnderlyingContiguousHeader {
+    pub fn with_size(size: usize) -> UnderlyingContiguousHeader {
+        UnderlyingContiguousHeader { size, offset: 0 }
     }
 
-    pub fn with_offset(size: usize, offset: usize) -> UnderlyingHeader {
-        UnderlyingHeader { size, offset }
+    pub fn with_offset(size: usize, offset: usize) -> UnderlyingContiguousHeader {
+        UnderlyingContiguousHeader { size, offset }
     }
 }
 
@@ -53,10 +52,10 @@ impl UnderlyingHeader {
 /// request more contiguous memory fails.
 /// - Not suitable for large allocations/reallocations or multithreaded code//
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ContiguousHeader(NonNull<UnderlyingHeader>);
+pub struct ContiguousHeader(NonNull<UnderlyingContiguousHeader>);
 
 impl InlineHeader for ContiguousHeader {
-    type Header = UnderlyingHeader;
+    type Header = UnderlyingContiguousHeader;
 
     fn new<T: ?Sized>(ptr: *mut T) -> Self {
         if ptr.is_null() {
@@ -114,13 +113,16 @@ impl InlineHeader for ContiguousHeader {
     }
 
     fn last_addr(&self) -> usize {
-        usize::from(self.addr()) + size_of::<UnderlyingHeader>() + self.get_offset() + self.size()
+        usize::from(self.addr())
+            + size_of::<UnderlyingContiguousHeader>()
+            + self.get_offset()
+            + self.size()
     }
 
     #[inline]
     unsafe fn next_unchecked(&self) -> ContiguousHeader {
         unsafe {
-            self.byte_add(size_of::<UnderlyingHeader>() + self.get_offset() + self.size())
+            self.byte_add(size_of::<UnderlyingContiguousHeader>() + self.get_offset() + self.size())
                 .into()
         }
     }
@@ -132,24 +134,27 @@ impl InlineHeader for ContiguousHeader {
         required_size: usize,
         align: usize,
     ) -> bool {
-        let merged_size = self.size() + last_header.size();
+        let merged_size = self.size() + self.get_offset() + last_header.size();
         let fits_with_merge = merged_size >= required_size;
 
-        if fits_with_merge {
-            let data_ptr = unsafe { last_header.add(1) };
-            let alignment_offset = data_ptr.align_offset(align);
-            if alignment_offset == usize::MAX {
-                return false;
-            }
-
-            last_header.set_offset(alignment_offset);
-            last_header.add_size(self.size() + self.get_offset() + size_of::<UnderlyingHeader>());
-
-            unsafe {
-                self.write_bytes(0, size_of::<UnderlyingHeader>());
-            }
-            self.set(*last_header);
+        if !fits_with_merge {
+            return true;
         }
+
+        let data_ptr = unsafe { last_header.add(1) };
+        let alignment_offset = data_ptr.align_offset(align);
+        if alignment_offset == usize::MAX {
+            return false;
+        }
+
+        last_header.set_offset(alignment_offset);
+        last_header
+            .add_size(self.size() + self.get_offset() + size_of::<UnderlyingContiguousHeader>());
+
+        unsafe {
+            self.write_bytes(0, size_of::<UnderlyingContiguousHeader>());
+        }
+        self.set(*last_header);
 
         true
     }
@@ -161,29 +166,23 @@ impl InlineHeader for ContiguousHeader {
     /// Or if `new_size > header.size() + size_of::<Header>()`
     fn try_split_allocated_block(&mut self, new_size: usize, last_addr: usize) {
         let next_header = unsafe { self.next_unchecked() };
-        if !self.can_split_allocated_block(&next_header, new_size, last_addr) {
+        if !self.can_split_allocated_block(new_size, last_addr) {
             return;
         }
 
-        let second_block_size = self.size() - size_of::<UnderlyingHeader>() - new_size;
+        let second_block_size = self.size() - size_of::<UnderlyingContiguousHeader>() - new_size;
         self.set_size(new_size);
 
-        let new_header = UnderlyingHeader::with_size(second_block_size);
+        let new_header = UnderlyingContiguousHeader::with_size(second_block_size);
         unsafe {
             next_header.write(new_header);
         }
     }
 
     #[inline]
-    fn can_split_allocated_block(
-        &self,
-        next_header: &Self,
-        new_size: usize,
-        last_addr: usize,
-    ) -> bool {
-        let space_for_new_block = self.size() > size_of::<UnderlyingHeader>() + new_size;
-        let within_buffer =
-            (usize::from(next_header.addr()) + size_of::<UnderlyingHeader>()) < last_addr;
+    fn can_split_allocated_block(&self, new_size: usize, last_addr: usize) -> bool {
+        let space_for_new_block = self.size() > size_of::<UnderlyingContiguousHeader>() + new_size;
+        let within_buffer = self.last_addr() < last_addr;
 
         space_for_new_block && within_buffer
     }
@@ -192,7 +191,7 @@ impl InlineHeader for ContiguousHeader {
         mut page_allocator: impl crate::page_allocator::PageAllocator,
     ) -> *mut Self::Header {
         const {
-            let header_size = size_of::<UnderlyingHeader>();
+            let header_size = size_of::<UnderlyingContiguousHeader>();
             assert!(header_size < PAGE_SIZE);
             assert!(header_size % 8 == 0)
         }
@@ -200,13 +199,13 @@ impl InlineHeader for ContiguousHeader {
         let page_ptr = unsafe {
             page_allocator
                 .request_page_zeroed()
-                .cast::<UnderlyingHeader>()
+                .cast::<UnderlyingContiguousHeader>()
         };
         if page_ptr.is_null() {
             panic!("Failed to allocate the first page");
         }
 
-        let head = UnderlyingHeader::with_size(page_allocator.get_page_size());
+        let head = UnderlyingContiguousHeader::with_size(page_allocator.get_page_size());
         unsafe {
             page_ptr.write(head);
         }
@@ -226,14 +225,133 @@ impl InlineHeader for ContiguousHeader {
 }
 
 impl Deref for ContiguousHeader {
-    type Target = NonNull<UnderlyingHeader>;
+    type Target = NonNull<UnderlyingContiguousHeader>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl From<NonNull<UnderlyingHeader>> for ContiguousHeader {
-    fn from(value: NonNull<UnderlyingHeader>) -> Self {
+impl From<NonNull<UnderlyingContiguousHeader>> for ContiguousHeader {
+    fn from(value: NonNull<UnderlyingContiguousHeader>) -> Self {
         ContiguousHeader::new(value.as_ptr())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        array_page_allocator::ArrayPageAllocator, linked_header::LinkedHeader,
+        list_allocator::ListAllocator,
+    };
+
+    use super::*;
+    use core::alloc::Layout;
+    use std::alloc::Allocator;
+
+    #[test]
+    fn alloc_chunks() {
+        let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        let layout = Layout::new::<[u8; 16]>();
+
+        unsafe {
+            let chunk = allocator.allocate(layout).unwrap();
+            allocator.deallocate(chunk.cast(), layout);
+
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+            let three = allocator.allocate(layout).unwrap().cast();
+
+            allocator.deallocate(three, layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, layout);
+        }
+    }
+
+    #[test]
+    fn overflow() {
+        let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        let layout = Layout::new::<[u8; 5000]>();
+
+        unsafe {
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, layout);
+        }
+    }
+
+    #[test]
+    fn zeroed() {
+        let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        let layout = Layout::new::<[u8; 16]>();
+
+        unsafe {
+            let one: NonNull<u8> = allocator.allocate_zeroed(layout).unwrap().cast();
+            let two: NonNull<u8> = allocator.allocate_zeroed(layout).unwrap().cast();
+
+            let two_sum: u8 = (0..16).into_iter().map(|i| two.add(i).read()).sum();
+            let one_sum: u8 = (0..16).into_iter().map(|i| one.add(i).read()).sum();
+            assert_eq!(two_sum, 0);
+            assert_eq!(one_sum, 0);
+
+            allocator.deallocate(two, layout);
+            allocator.deallocate(one, layout);
+        }
+    }
+
+    #[test]
+    fn realloc() {
+        let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        let layout = Layout::new::<[u8; 16]>();
+        let new_layout = Layout::new::<[u8; 32]>();
+
+        unsafe {
+            let one = allocator.allocate(layout).unwrap().cast();
+            let two = allocator.allocate(layout).unwrap().cast();
+
+            allocator.grow(two, layout, new_layout);
+            allocator.deallocate(one, layout);
+            allocator.deallocate(two, new_layout);
+        }
+    }
+
+    #[test]
+    fn merge() {
+        let allocator = ListAllocator::<ArrayPageAllocator>::default();
+        let layout = Layout::new::<[u8; 2000]>();
+        let second_layout = Layout::new::<[u8; 3080]>();
+
+        unsafe {
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
+
+            let two = allocator.allocate(second_layout).unwrap().cast();
+            allocator.deallocate(two, second_layout);
+        }
+    }
+
+    #[test]
+    fn multiple_allocators() {
+        let mut page_allocator = ArrayPageAllocator::default();
+        let allocator =
+            ListAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator);
+        let layout = Layout::new::<[u8; 2000]>();
+        let second_layout = Layout::new::<[u8; 3080]>();
+
+        unsafe {
+            let one = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(one, layout);
+
+            let two = allocator.allocate(second_layout).unwrap().cast();
+            allocator.deallocate(two, second_layout);
+        }
+    }
+
+    #[test]
+    fn with_box() {
+        let allocator = ListAllocator::default();
+        let mut chunk = Box::<[u8; 16], ListAllocator>::new_in([0; 16], allocator);
+        chunk[0] = 1;
     }
 }

@@ -1,8 +1,7 @@
+use crate::page_allocator::PageAllocator;
+use core::alloc::Layout;
 use core::ops::Deref;
 use core::ptr::NonNull;
-use std::alloc::Layout;
-
-use crate::page_allocator::PageAllocator;
 
 /// A structure represented a pointer to a header which represents a single block of memory
 // NOTE u8 is just a placehoelder, it just needs to be a pointer
@@ -54,7 +53,8 @@ where
     unsafe fn next_unchecked(&self) -> Self;
 
     /// Merges two consecutive memory blocks in the buffer
-    fn merge_block(&mut self, last_header: &mut Self, required_size: usize, align: usize) -> bool;
+    /// self and prev_header must point to contiguous blocks in memory
+    fn merge_block(&mut self, prev_header: &mut Self, required_size: usize, align: usize) -> bool;
 
     /// Attempts to split the allocated block represented
     /// by `header`, into two blocks, the first one of size `new_size`
@@ -62,12 +62,7 @@ where
     /// Does nothing if there isn't enough space to split the block
     /// Or if `new_size > header.size() + size_of::<Header>()`
     fn try_split_allocated_block(&mut self, new_size: usize, last_addr: usize);
-    fn can_split_allocated_block(
-        &self,
-        next_header: &Self,
-        new_size: usize,
-        last_addr: usize,
-    ) -> bool;
+    fn can_split_allocated_block(&self, new_size: usize, last_addr: usize) -> bool;
 
     /// Allocates a new buffer of size `size` using the given `page_allocator`
     /// then writes a base header to it the buffer
@@ -84,19 +79,3 @@ where
         size_of::<Self::Header>()
     }
 }
-
-// impl Deref for T
-// where
-//     T: InlineHeader,
-// {
-//     type Target = NonNull<Header>;
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-//
-// impl From<NonNull<Header>> for HeaderPtr {
-//     fn from(value: NonNull<Header>) -> Self {
-//         HeaderPtr(value)
-//     }
-// }

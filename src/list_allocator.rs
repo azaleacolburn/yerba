@@ -31,7 +31,7 @@ use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 /// ## Direct Allocation
 /// ```rust
 /// #![feature(allocator_api)]
-/// use yerba::{inline_allocator::ListAllocator, array_page_allocator::ArrayPageAllocator};
+/// use yerba::{list_allocator::ListAllocator, array_page_allocator::ArrayPageAllocator};
 /// use core::alloc::{Allocator, Layout};
 ///
 /// let allocator = ListAllocator::<ArrayPageAllocator>::default();
@@ -47,7 +47,7 @@ use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 /// ## Use in a structure
 /// ```rust
 /// #![feature(allocator_api)]
-/// use yerba::inline_allocator::ListAllocator;
+/// use yerba::list_allocator::ListAllocator;
 ///
 /// let allocator = ListAllocator::default();
 /// let mut chunk = Box::<[u8; 16], ListAllocator>::new_in([0; 16], allocator);
@@ -259,9 +259,10 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
     }
 }
 
-impl<'a, A> WithPageSize for ListAllocator<'a, A>
+impl<'a, A, H> WithPageSize for ListAllocator<'a, A, H>
 where
     A: PageAllocator + WithPageSize,
+    H: InlineHeader,
 {
     /// Creates a new contiguous list allocator
     /// Manually allocates its own page_allocator with a given page size (not recommended)
@@ -272,7 +273,7 @@ where
     ///
     /// # Usage
     /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator, with_page_size::WithPageSize};
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator, with_page_size::WithPageSize};
     /// let allocator = ListAllocator::<ArrayPageAllocator>::with_page_size(4096);
     /// ```
     fn with_page_size(page_size: usize) -> Self {
@@ -281,9 +282,10 @@ where
     }
 }
 
-impl<'a, A> Default for ListAllocator<'a, A>
+impl<'a, A, H> Default for ListAllocator<'a, A, H>
 where
     A: PageAllocator + WithPageSize,
+    H: InlineHeader,
 {
     /// Creates a new contiguous list allocator
     /// Manually allocates its own page_allocator using the default page size (not recommended )
@@ -294,7 +296,7 @@ where
     ///
     /// # Usage
     /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, inline_allocator::ListAllocator};
+    /// use yerba::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator};
     /// let allocator = ListAllocator::<ArrayPageAllocator>::default();
     /// ```
 
@@ -315,6 +317,7 @@ where
         if H::is_invalid_layout(&layout) {
             return Err(AllocError);
         }
+        println!("here");
 
         let size = layout.size();
         let align = layout.align();
@@ -443,6 +446,8 @@ where
 
 #[cfg(test)]
 mod test {
+    use crate::linked_header::LinkedHeader;
+
     use super::*;
     use core::alloc::Layout;
 

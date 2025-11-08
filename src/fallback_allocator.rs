@@ -80,7 +80,7 @@ where
 mod test {
     use core::alloc::Layout;
 
-    use crate::{inline_allocator::ListAllocator, stack_allocator::StackAllocator};
+    use crate::{list_allocator::ListAllocator, stack_allocator::StackAllocator};
 
     use super::*;
 
