@@ -1,7 +1,10 @@
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]
-// #![no_std]
+#![no_std]
 #![allow(static_mut_refs)]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod array_page_allocator;
 pub mod contiguous_header;

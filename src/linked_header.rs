@@ -1,8 +1,4 @@
-use std::{
-    num::NonZeroUsize,
-    ops::Deref,
-    ptr::NonNull,
-};
+use core::{alloc::Layout, num::NonZeroUsize, ops::Deref, ptr::NonNull};
 
 use crate::{
     inline_header::InlineHeader,
@@ -184,7 +180,7 @@ impl InlineHeader for LinkedHeader {
         }
     }
 
-    fn is_invalid_layout(layout: &std::alloc::Layout) -> bool {
+    fn is_invalid_layout(layout: &Layout) -> bool {
         layout.size() > PAGE_SIZE * 12 && layout.align() > MAX_ALIGN
     }
 }
@@ -229,6 +225,7 @@ mod test {
     use super::*;
     use crate::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator};
     use core::alloc::{Allocator, Layout};
+    use std::boxed::Box;
 
     #[test]
     fn alloc_chunks() {

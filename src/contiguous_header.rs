@@ -239,14 +239,11 @@ impl From<NonNull<UnderlyingContiguousHeader>> for ContiguousHeader {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        array_page_allocator::ArrayPageAllocator, linked_header::LinkedHeader,
-        list_allocator::ListAllocator,
-    };
+    use crate::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator};
 
     use super::*;
-    use core::alloc::Layout;
-    use std::alloc::Allocator;
+    use core::alloc::{Allocator, Layout};
+    use std::boxed::Box;
 
     #[test]
     fn alloc_chunks() {

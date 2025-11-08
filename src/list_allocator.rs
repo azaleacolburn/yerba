@@ -317,7 +317,6 @@ where
         if H::is_invalid_layout(&layout) {
             return Err(AllocError);
         }
-        println!("here");
 
         let size = layout.size();
         let align = layout.align();
@@ -446,10 +445,9 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::linked_header::LinkedHeader;
-
     use super::*;
     use core::alloc::Layout;
+    use std::boxed::Box;
 
     #[test]
     fn alloc_chunks() {

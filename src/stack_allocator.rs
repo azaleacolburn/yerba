@@ -180,9 +180,9 @@ unsafe impl Allocator for StackAllocator {
 
 #[cfg(test)]
 mod test {
-    use core::alloc::Layout;
-
     use super::*;
+    use core::alloc::Layout;
+    use std::boxed::Box;
 
     #[test]
     fn alloc_chunks() {
