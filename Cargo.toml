@@ -5,7 +5,7 @@ edition = "2024"
 
 [[bench]]
 name = "allocators"
-path = "benchmarks/allocators.rs"
+path = "benchmarks/lib.rs"
 harness = false
 
 

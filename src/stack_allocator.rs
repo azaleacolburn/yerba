@@ -89,10 +89,12 @@ impl StackAllocator {
         StackAllocator { buf, offset: ptr }
     }
 
+    #[inline]
     pub fn get_offset(&self) -> usize {
         unsafe { (self.buf.get() as *mut usize).read() }
     }
 
+    #[inline]
     pub fn set_offset(&mut self, n: usize) {
         unsafe { (self.buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize).write(n) }
     }
@@ -113,6 +115,7 @@ impl StackAllocator {
         }
     }
 
+    #[inline]
     pub fn is_top(&self, ptr: NonNull<u8>, size: usize) -> bool {
         unsafe {
             usize::from(ptr.addr()) + size == self.buf.get().byte_add(self.get_offset()).addr()
@@ -153,7 +156,7 @@ unsafe impl Allocator for StackAllocator {
     /// If ptr was not to the last allocated object, nothing happens
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         let size = layout.size();
-        if !self.is_top(ptr, layout.size()) {
+        if !self.is_top(ptr, size) {
             return;
         }
 

@@ -13,16 +13,18 @@ use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 // NOTE Explicitly dropping is not important because
 // all the underlying memory is deallocated by the page allocator
 
-/// A general alloctor where headers to memory blocks are inlined to the buffer
-/// Functionality can depend widely on which `InlineHeader` is used
+/// A general allocator where headers to memory blocks are inlined to the buffer, rather than being
+/// stored in an external map.
+/// Functionality can depend widely on which `InlineHeader` is used.
+///
 /// The generic header struct controls:
 /// - How the next header is accessed
 /// - How new memory blocks are allocated
 /// - How/if blocks can be merged and split
 ///
 /// # Use Cases
-/// This is a versatile, single-threaded allocator with few limitations
-/// The exact suitability depends on the `InlineHeader`
+/// - This is a versatile, single-threaded allocator with few limitations
+/// - The exact suitability depends on the `InlineHeader`
 ///
 /// ## Limitations
 /// - Depends on the `InlineHeader` chosen
@@ -54,8 +56,10 @@ use core::{cell::UnsafeCell, ptr::slice_from_raw_parts_mut};
 /// chunk[0] = 1;
 /// ```
 ///
+/// The default header is the `ContiguousHeader`, which organizes the `ListAllocator` as a single
+/// contiguous list with inlined headers.
 ///
-/// This isn't valid
+/// Other options include
 pub struct ListAllocator<'a, A = ArrayPageAllocator<'a>, H = ContiguousHeader>
 where
     A: PageAllocator,

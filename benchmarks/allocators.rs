@@ -1,4 +1,4 @@
-#![feature(allocator_api)]
+#c![feature(allocator_api)]
 use core::alloc::{Allocator, GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
@@ -135,18 +135,4 @@ fn contiguous_allocator_box_alloc_free(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    contiguous_list_create,
-    contiguous_list_alloc,
-    contiguous_list_free,
-    contiguous_list_alloc_free,
-    stack_create,
-    stack_free,
-    stack_alloc,
-    c_malloc_free,
-    c_free,
-    rust_box_alloc_free,
-    contiguous_allocator_box_alloc_free
-);
-criterion_main!(benches);
+
