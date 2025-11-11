@@ -1,10 +1,9 @@
+use crate::util::to_non_null_slice;
 use core::{
     alloc::{AllocError, Allocator, Layout},
     cell::UnsafeCell,
     ptr::NonNull,
 };
-
-use crate::util::to_non_null_slice;
 
 const BUF_SIZE: usize = 4096 * 2;
 
@@ -78,7 +77,6 @@ const BUF_SIZE: usize = 4096 * 2;
 /// a silent failure
 pub struct StackAllocator {
     buf: UnsafeCell<[u8; BUF_SIZE]>,
-    offset: *mut usize,
 }
 
 impl StackAllocator {
@@ -86,7 +84,7 @@ impl StackAllocator {
         let mut buf = UnsafeCell::new([0; BUF_SIZE]);
         let ptr = buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize;
         unsafe { ptr.write(size_of::<usize>()) };
-        StackAllocator { buf, offset: ptr }
+        StackAllocator { buf }
     }
 
     #[inline]

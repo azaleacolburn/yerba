@@ -1,9 +1,9 @@
 use crate::{
     inline_header::InlineHeader,
-    util::{MAX_ALIGN, MAX_BLOCK_SIZE, MIN_ALIGN, MIN_BLOCK_SIZE, PAGE_SIZE},
+    util::PAGE_SIZE,
 };
 use core::ptr::NonNull;
-use core::{alloc::Layout, ops::Deref};
+use core::ops::Deref;
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
