@@ -318,7 +318,7 @@ where
     /// If a block is found whose size exceeds `size` by more than `size_of::<Header>()`, it will be split into two blocks
     /// and a pointer to the first of the headers will be returned
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        if H::is_invalid_layout(&layout) {
+        if !H::is_valid_layout(&layout) {
             return Err(AllocError);
         }
 

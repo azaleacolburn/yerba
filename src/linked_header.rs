@@ -180,8 +180,8 @@ impl InlineHeader for LinkedHeader {
         }
     }
 
-    fn is_invalid_layout(layout: &Layout) -> bool {
-        layout.size() > PAGE_SIZE * 12 && layout.align() > MAX_ALIGN
+    fn is_valid_layout(layout: &Layout) -> bool {
+        layout.size() <= PAGE_SIZE * 12 && layout.align() <= MAX_ALIGN
     }
 }
 

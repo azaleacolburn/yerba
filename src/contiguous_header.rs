@@ -107,18 +107,6 @@ impl InlineHeader for ContiguousHeader {
         self.0 = ptr.0
     }
 
-    fn get_data(&self) -> NonNull<u8> {
-        let offset = self.get_offset();
-        unsafe { self.0.add(1).byte_add(offset).cast::<u8>() }
-    }
-
-    fn last_addr(&self) -> usize {
-        usize::from(self.addr())
-            + size_of::<UnderlyingContiguousHeader>()
-            + self.get_offset()
-            + self.size()
-    }
-
     #[inline]
     unsafe fn next_unchecked(&self) -> ContiguousHeader {
         unsafe {
@@ -211,16 +199,6 @@ impl InlineHeader for ContiguousHeader {
         }
 
         page_ptr
-    }
-
-    #[inline]
-    fn is_invalid_layout(&layout: &Layout) -> bool {
-        let align = layout.align();
-        let size = layout.size();
-        align > MAX_ALIGN
-            || align < MIN_ALIGN
-            || size < MIN_BLOCK_SIZE
-            || size + size_of::<Self::Header>() > MAX_BLOCK_SIZE
     }
 }
 
