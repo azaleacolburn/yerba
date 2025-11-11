@@ -12,6 +12,7 @@ pub mod fallback_allocator;
 pub mod inline_header;
 pub mod linked_header;
 pub mod list_allocator;
+pub mod mapped_allocator;
 pub mod page_allocator;
 pub mod stack_allocator;
 mod util;
