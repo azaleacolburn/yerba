@@ -255,6 +255,11 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     fn get_page_size(&self) -> usize {
         self.page_size
     }
+
+    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> Option<*mut u8> {
+        println!("HI");
+        todo!()
+    }
 }
 
 unsafe impl<'a> Send for ArrayPageAllocator<'a> {}
