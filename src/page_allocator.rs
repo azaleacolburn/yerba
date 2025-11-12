@@ -4,6 +4,7 @@ pub trait PageAllocator {
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
     /// Attempts to extend a given allocated block by `added_size`, returns true if it was able to
     /// extend the block, false otherwise
+    /// Does not attempt to allocate a new page if the current one could not be extended
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool;
     fn get_pages_allocated(&self) -> usize;
     fn get_page_size(&self) -> usize;
@@ -40,7 +41,7 @@ where
     }
 
     #[inline]
-    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> Option<*mut u8> {
+    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
         unsafe { (**self).extend_page(ptr, added_size) }
     }
 

@@ -3,7 +3,7 @@ use crate::page_allocator::PageAllocator;
 use crate::util::PAGE_SIZE;
 use crate::with_page_size::WithPageSize;
 use core::alloc::{AllocError, Allocator};
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
@@ -24,7 +24,7 @@ pub struct MappedAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
 {
-    headers: RefCell<*mut MappedHeader>,
+    headers: Cell<*mut MappedHeader>,
     header_buffer_size: usize,
     headers_allocated: usize,
     page_allocator: RefCell<A>,
@@ -36,7 +36,7 @@ where
     A: PageAllocator,
 {
     fn headers(&self) -> *mut MappedHeader {
-        *self.headers.borrow_mut()
+        self.headers.get()
     }
     fn with_allocator(mut page_allocator: A) -> MappedAllocator<'a, A> {
         let page_size = page_allocator.get_page_size();
@@ -54,7 +54,7 @@ where
         }
 
         Self {
-            headers: RefCell::new(headers_buffer),
+            headers: Cell::new(headers_buffer),
             header_buffer_size: page_size,
             headers_allocated: 1,
             page_allocator: RefCell::new(page_allocator),
@@ -87,12 +87,12 @@ where
 
     fn header_space_remaining(&self) -> bool {
         unsafe {
-            self.headers.borrow().byte_add(self.header_buffer_size)
-                > self.headers.borrow().add(self.headers_allocated)
+            self.headers.get().byte_add(self.header_buffer_size)
+                > self.headers.get().add(self.headers_allocated)
         }
     }
 
-    fn add_header(&self, data: *mut u8, size: usize) {
+    fn add_header(&self, data: *mut u8, size: usize) -> *mut MappedHeader {
         let header = MappedHeader {
             size,
             data,
@@ -102,34 +102,39 @@ where
 
         if self.header_space_remaining() {
             unsafe {
-                let header_ptr = self.headers.borrow().add(self.headers_allocated);
-                header_ptr.write(header)
-            }
+                let header_ptr = self.headers.get().add(self.headers_allocated);
+                header_ptr.write(header);
 
-            return;
+                return header_ptr;
+            }
         }
 
         unsafe {
-            match self
+            // If true, we have to reserve a new buffer then copy over
+            // all our headers
+            //
+            // Otherwise, our current header buffer has been expanded and we can safely write
+            let extended = self
                 .page_allocator
                 .borrow_mut()
-                .extend_page(self.headers().cast(), size_of::<MappedHeader>() * 12)
-            {
-                // Means we have to reserve a new buffer then copy over
-                // all our headers
-                true => {
-                    let page = self
-                        .page_allocator
-                        .borrow_mut()
-                        .request_page()
-                        .cast::<MappedHeader>();
-                    core::ptr::copy_nonoverlapping(self.headers(), page, self.headers_allocated);
+                .extend_page(self.headers().cast(), size_of::<MappedHeader>() * 12);
 
-                    *self.headers.borrow_mut() = page;
-                }
-                // Means our current header buffer has been expanded and we can safely write
-                false => self.headers().add(self.headers_allocated).write(header),
+            if !extended {
+                let page = self
+                    .page_allocator
+                    .borrow_mut()
+                    .request_page()
+                    .cast::<MappedHeader>();
+                core::ptr::copy_nonoverlapping(self.headers(), page, self.headers_allocated);
+                self.headers.set(page);
             }
+
+            // Then, because we know we have enough space, we can just write our header as the last
+            // item in the headers buffer
+            let header_ptr = self.headers().add(self.headers_allocated);
+            header_ptr.write(header);
+
+            header_ptr
         }
     }
 
@@ -160,27 +165,29 @@ where
     // TODO
     // For each header, we want to see if it's extendable, if it is we can return
     // If none are extendible, then we allocate a completely new block
-    fn alloc_more_space(&self, needed_space: usize) -> Result<(), ()> {
-        let mut header_ptr = self.headers;
+    /// Returns a safe place for a block of size `needed_space` to be alloced in
+    /// or an `AllocError`
+    fn alloc_more_space(&self, needed_space: usize) -> Result<*mut u8, AllocError> {
+        let mut header_ptr = self.headers.get();
         unsafe {
             let last_header_addr = self.headers().byte_add(self.header_buffer_size);
 
             let mut allocator = self.page_allocator.borrow_mut();
             while header_ptr < last_header_addr {
                 // We're going to make the same call to the page allocator multiple times, which sucks
-                let header = header_ptr.borrow().read();
-                // But we don't want the page to be reallocated here, just extended if possible
-                let did_extend = allocator.extend_page(header.data, needed_space);
-                let ptr = match did_extend {
-                    true => MappedAllocator::<'a, A>::last_addr(),
-                    false => continue,
-                };
+                let header = header_ptr.read();
+                let extended = allocator.extend_page(header.data, needed_space);
+                // If the page has been extended, then we can just write to the last address after
+                // the current header_ptr
+                if extended {
+                    return Ok(header.last_addr());
+                }
 
                 header_ptr = header_ptr.add(1);
             }
         }
 
-        return Err(());
+        return Err(AllocError);
     }
 }
 
@@ -194,18 +201,17 @@ where
         let size = layout.size();
         let align = layout.align();
 
-        let page_size = self.page_allocator.borrow().get_page_size();
-
         let maybe_block = self.find_empty_block(size);
-
         let header_ptr = match maybe_block {
             Some(ptr) => ptr,
-            None => unsafe {
-                self.alloc_more_space(needed_space);
-                self.add_header(data, size);
-            },
+            None => {
+                // TODO Figure out how much space we need exactly (maybe there's some offset that
+                // makes this not work
+                let data_ptr = self.alloc_more_space(size)?;
+                self.add_header(data_ptr, size)
+            }
         };
-        // .ok_or(AllocError)?;
+
         self.try_split_block(header_ptr, size);
         let header = unsafe { header_ptr.read() };
 
@@ -213,9 +219,9 @@ where
         let offset_data = header.data.wrapping_add(alignment_offset);
         unsafe { (*header_ptr).data = offset_data };
 
-        let data_ptr = NonNull::new(offset_data).ok_or(AllocError)?;
+        let data_ptr =
+            NonNull::slice_from_raw_parts(NonNull::new(offset_data).ok_or(AllocError)?, size);
 
-        let data_ptr = NonNull::slice_from_raw_parts(data_ptr, size);
         Ok(data_ptr)
     }
 

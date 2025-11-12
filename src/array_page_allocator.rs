@@ -244,6 +244,12 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
 
     fn get_pages_allocated(&self) -> usize {
         let page_array_count = self.page_array_count as usize;
+
+        // This is outside the general style of this project
+        // (0..page_array_count)
+        //     .into_iter()
+        //     .map(|i| self.page_array_buffer[i].pages_loaned)
+        //     .sum()
         let mut sum = 0;
         for i in 0..page_array_count {
             let page_array = &self.page_array_buffer[i];
@@ -256,14 +262,14 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         self.page_size
     }
 
-    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> Option<*mut u8> {
-        println!("HI");
-        todo!()
+    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
+        let last_addr = unsafe { ptr.byte_add(self.page_size) };
+        match map_fixed(last_addr, added_size) {
+            Ok(_) => true,
+            Err(_) => false,
+        }
     }
 }
-
-unsafe impl<'a> Send for ArrayPageAllocator<'a> {}
-unsafe impl<'a> Sync for ArrayPageAllocator<'a> {}
 
 impl<'a> Default for ArrayPageAllocator<'a> {
     fn default() -> Self {
