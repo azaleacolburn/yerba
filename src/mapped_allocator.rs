@@ -1,5 +1,3 @@
-use libc::qsort;
-
 use crate::array_page_allocator::ArrayPageAllocator;
 use crate::page_allocator::PageAllocator;
 use crate::util::PAGE_SIZE;
@@ -12,14 +10,21 @@ use core::ptr::NonNull;
 pub struct MappedHeader {
     data: *mut u8,
     size: usize,
+    offset: usize,
     used: bool,
+}
+
+impl MappedHeader {
+    fn last_addr(&self) -> *mut u8 {
+        unsafe { self.data.add(self.size + self.offset) }
+    }
 }
 
 pub struct MappedAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
 {
-    headers: *mut MappedHeader,
+    headers: RefCell<*mut MappedHeader>,
     header_buffer_size: usize,
     headers_allocated: usize,
     page_allocator: RefCell<A>,
@@ -30,6 +35,9 @@ impl<'a, A> MappedAllocator<'a, A>
 where
     A: PageAllocator,
 {
+    fn headers(&self) -> *mut MappedHeader {
+        *self.headers.borrow_mut()
+    }
     fn with_allocator(mut page_allocator: A) -> MappedAllocator<'a, A> {
         let page_size = page_allocator.get_page_size();
         let blocks_buffer = unsafe { page_allocator.request_page_zeroed() };
@@ -38,6 +46,7 @@ where
         let initial_header = MappedHeader {
             data: blocks_buffer.cast::<u8>(),
             size: page_size,
+            offset: 0,
             used: false,
         };
         unsafe {
@@ -45,7 +54,7 @@ where
         }
 
         Self {
-            headers: headers_buffer,
+            headers: RefCell::new(headers_buffer),
             header_buffer_size: page_size,
             headers_allocated: 1,
             page_allocator: RefCell::new(page_allocator),
@@ -78,8 +87,8 @@ where
 
     fn header_space_remaining(&self) -> bool {
         unsafe {
-            self.headers.byte_add(self.header_buffer_size)
-                > self.headers.add(self.headers_allocated)
+            self.headers.borrow().byte_add(self.header_buffer_size)
+                > self.headers.borrow().add(self.headers_allocated)
         }
     }
 
@@ -87,12 +96,13 @@ where
         let header = MappedHeader {
             size,
             data,
+            offset: 0,
             used: false,
         };
 
         if self.header_space_remaining() {
             unsafe {
-                let header_ptr = self.headers.add(self.headers_allocated);
+                let header_ptr = self.headers.borrow().add(self.headers_allocated);
                 header_ptr.write(header)
             }
 
@@ -103,24 +113,30 @@ where
             match self
                 .page_allocator
                 .borrow_mut()
-                .extend_page(self.headers.cast(), size_of::<MappedHeader>() * 12)
+                .extend_page(self.headers().cast(), size_of::<MappedHeader>() * 12)
             {
-                // Means we have to copy over our entire old header buffer
-                Some(ptr) => core::ptr::copy_nonoverlapping(
-                    self.headers,
-                    ptr.cast::<MappedHeader>(),
-                    self.headers_allocated,
-                ),
+                // Means we have to reserve a new buffer then copy over
+                // all our headers
+                true => {
+                    let page = self
+                        .page_allocator
+                        .borrow_mut()
+                        .request_page()
+                        .cast::<MappedHeader>();
+                    core::ptr::copy_nonoverlapping(self.headers(), page, self.headers_allocated);
+
+                    *self.headers.borrow_mut() = page;
+                }
                 // Means our current header buffer has been expanded and we can safely write
-                None => self.headers.add(self.headers_allocated).write(header),
+                false => self.headers().add(self.headers_allocated).write(header),
             }
         }
     }
 
     fn find_block(&self, predicate: impl Fn(MappedHeader) -> bool) -> Option<*mut MappedHeader> {
-        let mut header_ptr = self.headers;
+        let mut header_ptr = self.headers();
         unsafe {
-            let last_addr = self.headers.byte_add(self.header_buffer_size);
+            let last_addr = self.headers().byte_add(self.header_buffer_size);
             let mut header = header_ptr.read();
 
             while !predicate(header) {
@@ -141,40 +157,30 @@ where
         self.find_block(|header: MappedHeader| header.data == ptr)
     }
 
-    fn last_addr(header_ptr: *mut MappedHeader) -> *mut u8 {
-        unsafe {
-            let header = header_ptr.read();
-            header.data.add(header.size)
-        }
-        
-    }
-
     // TODO
     // For each header, we want to see if it's extendable, if it is we can return
     // If none are extendible, then we allocate a completely new block
     fn alloc_more_space(&self, needed_space: usize) -> Result<(), ()> {
         let mut header_ptr = self.headers;
         unsafe {
-        let last_header_addr = self.headers.byte_add(self.header_buffer_size);
+            let last_header_addr = self.headers().byte_add(self.header_buffer_size);
 
-        let mut allocator = self.page_allocator.borrow_mut();
-        while header_ptr < last_header_addr {
-            // We're going to make the same call to the page allocator multiple times, which sucks
-            let header = header_ptr.read();
-                // But We don't want the page to be reallocated here, just extended if possible
-            let ptr = match allocator.extend_page(header.data, needed_space) {
-                    Some(ptr) => ptr,
-                    None => {
-                        continue;
-                    }
+            let mut allocator = self.page_allocator.borrow_mut();
+            while header_ptr < last_header_addr {
+                // We're going to make the same call to the page allocator multiple times, which sucks
+                let header = header_ptr.borrow().read();
+                // But we don't want the page to be reallocated here, just extended if possible
+                let did_extend = allocator.extend_page(header.data, needed_space);
+                let ptr = match did_extend {
+                    true => MappedAllocator::<'a, A>::last_addr(),
+                    false => continue,
                 };
 
-            header_ptr = header_ptr.add(1);
-        }
+                header_ptr = header_ptr.add(1);
+            }
         }
 
-        return Err(())
-        
+        return Err(());
     }
 }
 
@@ -195,17 +201,11 @@ where
         let header_ptr = match maybe_block {
             Some(ptr) => ptr,
             None => unsafe {
-                                let ptr = match self.page_allocator.borrow_mut().extend_page(, self.page_allocator) {
-                    Some(ptr) => ptr,
-                    None => self..add(self.headers_allocated)
-                };
-                if ptr.() {
-
-                }
+                self.alloc_more_space(needed_space);
                 self.add_header(data, size);
-            }
+            },
         };
-        .ok_or(AllocError)?;
+        // .ok_or(AllocError)?;
         self.try_split_block(header_ptr, size);
         let header = unsafe { header_ptr.read() };
 

@@ -2,7 +2,9 @@ pub trait PageAllocator {
     unsafe fn request_page(&mut self) -> *mut u8;
     unsafe fn request_page_zeroed(&mut self) -> *mut u8;
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
-    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> Option<*mut u8>;
+    /// Attempts to extend a given allocated block by `added_size`, returns true if it was able to
+    /// extend the block, false otherwise
+    unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool;
     fn get_pages_allocated(&self) -> usize;
     fn get_page_size(&self) -> usize;
 
