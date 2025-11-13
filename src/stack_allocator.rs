@@ -5,7 +5,7 @@ use core::{
     ptr::NonNull,
 };
 
-const BUF_SIZE: usize = 4096 * 2;
+const BUF_SIZE: usize = (4096 * 2) + size_of::<usize>();
 
 /// Allocator shaped like a stack
 /// Allows the allocation and deallocation of memory in a LIFO system
