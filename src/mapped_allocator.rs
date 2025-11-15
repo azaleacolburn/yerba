@@ -21,6 +21,45 @@ impl MappedHeader {
     }
 }
 
+/// An allocator in the shape of a map.
+///
+/// Holds a buffer of contiguous headers that each
+/// point to a not necessarily contiguous memory blocks.
+///
+/// When the header buffer runs out of space, all the buffers are copied to a new buffer if it
+/// can't be expanded in-place.
+///
+/// When a header is marked as used, if the underlying data block has space remaining, it is split
+/// and another header is written to the header buffer to represent the new second block
+///
+/// When a block is deallocated, the allocator checks for free adjacent blocks and merges any
+/// around it into one larger block. This kind of regular, automatic splitting and merging (not just when necessary)
+/// fundamentally trades speed for memory efficiency.
+///
+/// # Usage
+/// ## Directly
+/// ```rust
+/// #![feature(allocator_api)]
+/// use yerba::mapped_allocator::MappedAllocator;
+/// use core::alloc::{Allocator, Layout};
+///
+/// let allocator = MappedAllocator::default();
+/// let layout = Layout::new::<[u8; 200]>();
+/// let chunk = allocator.allocate(layout).unwrap().cast();
+/// // Do some stuff
+/// unsafe { allocator.deallocate(chunk, layout); }
+/// ```
+///
+/// ## With a smart pointer
+/// ```rust
+/// #![feature(allocator_api)]
+/// use yerba::mapped_allocator::MappedAllocator;
+/// use core::alloc::{Allocator, Layout};
+///
+/// let allocator = MappedAllocator::default();
+/// let mut chunk = Box::<[u8; 16], MappedAllocator>::new_in([0; 16], allocator);
+/// // Automatically cleaned up on drop
+/// ```
 pub struct MappedAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
