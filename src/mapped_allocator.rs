@@ -7,15 +7,16 @@ use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
+#[derive(Debug, Clone)]
 pub struct MappedHeader {
-    data: *mut u8,
+    data: NonNull<u8>,
     size: usize,
     offset: usize,
     used: bool,
 }
 
 impl MappedHeader {
-    fn last_addr(&self) -> *mut u8 {
+    fn last_addr(&self) -> NonNull<u8> {
         unsafe { self.data.add(self.size + self.offset) }
     }
 }
@@ -24,9 +25,10 @@ pub struct MappedAllocator<'a, A = ArrayPageAllocator<'a>>
 where
     A: PageAllocator,
 {
-    headers: Cell<*mut MappedHeader>,
+    headers: Cell<NonNull<MappedHeader>>,
     header_buffer_size: usize,
     headers_allocated: usize,
+
     page_allocator: RefCell<A>,
     marker: PhantomData<&'a A>,
 }
@@ -35,40 +37,43 @@ impl<'a, A> MappedAllocator<'a, A>
 where
     A: PageAllocator,
 {
-    fn headers(&self) -> *mut MappedHeader {
+    fn headers(&self) -> NonNull<MappedHeader> {
         self.headers.get()
     }
+
     fn with_allocator(mut page_allocator: A) -> MappedAllocator<'a, A> {
         let page_size = page_allocator.get_page_size();
-        let blocks_buffer = unsafe { page_allocator.request_page_zeroed() };
+
+        let blocks_buffer = unsafe { page_allocator.request_page_zeroed().cast::<u8>() };
         let headers_buffer = unsafe { page_allocator.request_page_zeroed().cast::<MappedHeader>() };
+        assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
 
         let initial_header = MappedHeader {
-            data: blocks_buffer.cast::<u8>(),
+            data: unsafe { NonNull::new_unchecked(blocks_buffer) },
             size: page_size,
             offset: 0,
             used: false,
         };
         unsafe {
             headers_buffer.write(initial_header);
-        }
 
-        Self {
-            headers: Cell::new(headers_buffer),
-            header_buffer_size: page_size,
-            headers_allocated: 1,
-            page_allocator: RefCell::new(page_allocator),
-            marker: PhantomData,
+            Self {
+                headers: Cell::new(NonNull::new_unchecked(headers_buffer)),
+                header_buffer_size: page_size,
+                headers_allocated: 1,
+                page_allocator: RefCell::new(page_allocator),
+                marker: PhantomData,
+            }
         }
     }
 
     /// Finds an empty block of `size`
-    fn find_empty_block(&self, size: usize) -> Option<*mut MappedHeader> {
+    fn find_empty_block(&self, size: usize) -> Option<NonNull<MappedHeader>> {
         let open_and_fits = |header: MappedHeader| !header.used && header.size >= size;
         self.find_block(open_and_fits)
     }
 
-    fn try_split_block(&self, header_ptr: *mut MappedHeader, new_size: usize) {
+    fn try_split_block(&self, mut header_ptr: NonNull<MappedHeader>, new_size: usize) {
         let header = unsafe { header_ptr.read() };
         let next_size = header.size - new_size;
 
@@ -81,7 +86,7 @@ where
         self.add_header(new_data_ptr, next_size);
 
         unsafe {
-            (*header_ptr).size = new_size;
+            header_ptr.as_mut().size = new_size;
         }
     }
 
@@ -92,7 +97,7 @@ where
         }
     }
 
-    fn add_header(&self, data: *mut u8, size: usize) -> *mut MappedHeader {
+    fn add_header(&self, data: NonNull<u8>, size: usize) -> NonNull<MappedHeader> {
         let header = MappedHeader {
             size,
             data,
@@ -114,10 +119,10 @@ where
             // all our headers
             //
             // Otherwise, our current header buffer has been expanded and we can safely write
-            let extended = self
-                .page_allocator
-                .borrow_mut()
-                .extend_page(self.headers().cast(), size_of::<MappedHeader>() * 12);
+            let extended = self.page_allocator.borrow_mut().extend_page(
+                self.headers().as_ptr().cast(),
+                size_of::<MappedHeader>() * 12,
+            );
 
             if !extended {
                 let page = self
@@ -125,8 +130,14 @@ where
                     .borrow_mut()
                     .request_page()
                     .cast::<MappedHeader>();
-                core::ptr::copy_nonoverlapping(self.headers(), page, self.headers_allocated);
-                self.headers.set(page);
+                assert!(page.is_null());
+
+                core::ptr::copy_nonoverlapping(
+                    self.headers().as_ptr(),
+                    page,
+                    self.headers_allocated,
+                );
+                self.headers.set(NonNull::new_unchecked(page));
             }
 
             // Then, because we know we have enough space, we can just write our header as the last
@@ -138,8 +149,12 @@ where
         }
     }
 
-    fn find_block(&self, predicate: impl Fn(MappedHeader) -> bool) -> Option<*mut MappedHeader> {
+    fn find_block(
+        &self,
+        predicate: impl Fn(MappedHeader) -> bool,
+    ) -> Option<NonNull<MappedHeader>> {
         let mut header_ptr = self.headers();
+
         unsafe {
             let last_addr = self.headers().byte_add(self.header_buffer_size);
             let mut header = header_ptr.read();
@@ -158,7 +173,7 @@ where
         }
     }
 
-    fn find_specific_block(&self, ptr: *mut u8) -> Option<*mut MappedHeader> {
+    fn find_specific_block(&self, ptr: NonNull<u8>) -> Option<NonNull<MappedHeader>> {
         self.find_block(|header: MappedHeader| header.data == ptr)
     }
 
@@ -167,7 +182,7 @@ where
     // If none are extendible, then we allocate a completely new block
     /// Returns a safe place for a block of size `needed_space` to be alloced in
     /// or an `AllocError`
-    fn alloc_more_space(&self, needed_space: usize) -> Result<*mut u8, AllocError> {
+    fn alloc_more_space(&self, needed_space: usize) -> Result<NonNull<u8>, AllocError> {
         let mut header_ptr = self.headers.get();
         unsafe {
             let last_header_addr = self.headers().byte_add(self.header_buffer_size);
@@ -176,7 +191,7 @@ where
             while header_ptr < last_header_addr {
                 // We're going to make the same call to the page allocator multiple times, which sucks
                 let header = header_ptr.read();
-                let extended = allocator.extend_page(header.data, needed_space);
+                let extended = allocator.extend_page(header.data.as_ptr(), needed_space);
                 // If the page has been extended, then we can just write to the last address after
                 // the current header_ptr
                 if extended {
@@ -202,7 +217,7 @@ where
         let align = layout.align();
 
         let maybe_block = self.find_empty_block(size);
-        let header_ptr = match maybe_block {
+        let mut header_ptr = match maybe_block {
             Some(ptr) => ptr,
             None => {
                 // TODO Figure out how much space we need exactly (maybe there's some offset that
@@ -216,19 +231,55 @@ where
         let header = unsafe { header_ptr.read() };
 
         let alignment_offset = header.data.align_offset(align);
-        let offset_data = header.data.wrapping_add(alignment_offset);
-        unsafe { (*header_ptr).data = offset_data };
+        let offset_data = unsafe { header.data.add(alignment_offset) };
+        unsafe { header_ptr.as_mut().data = offset_data };
 
-        let data_ptr =
-            NonNull::slice_from_raw_parts(NonNull::new(offset_data).ok_or(AllocError)?, size);
+        let data_ptr = NonNull::slice_from_raw_parts(offset_data, size);
 
         Ok(data_ptr)
     }
 
-    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
-        let header_ptr = self.find_specific_block(ptr.as_ptr()).unwrap();
+    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, _layout: core::alloc::Layout) {
+        let mut header_ptr = self.find_specific_block(ptr).unwrap();
         unsafe {
-            (*header_ptr).used = false;
+            header_ptr.as_mut().used = false;
+        }
+
+        // TODO
+        // Writing automatic merging is going to be sort of painful and slow
+
+        unsafe {
+            let header = header_ptr.read();
+            let get_next = |header: &MappedHeader| header.data.add(header.size);
+
+            let is_adjacent_after = |searching_header: MappedHeader| {
+                !searching_header.used && get_next(&header) == searching_header.data
+            };
+            let is_adjacent_before = |searching_header: MappedHeader| {
+                !searching_header.used && get_next(&searching_header) == header.data
+            };
+
+            // This traverses twice, which is annoying
+            let adjacent_after = self.find_block(is_adjacent_after);
+            if let Some(next_header_ptr) = adjacent_after {
+                // Absorb the next header
+                let next_header = next_header_ptr.read();
+                header_ptr.as_mut().size += next_header.size;
+
+                // Clear the next header
+                next_header.data.write_bytes(0, next_header.size);
+                next_header_ptr.write_bytes(0, size_of::<MappedHeader>());
+                // TODO Find some way to filter out empty blocks unless we want to shift them all
+                // down or smth ewww
+            }
+
+            let adjacent_before = self.find_block(is_adjacent_before);
+            if let Some(mut prev_header_ptr) = adjacent_before {
+                let header = header_ptr.read();
+                prev_header_ptr.as_mut().size += header.size;
+
+                header_ptr.write_bytes(0, size_of::<MappedHeader>());
+            }
         }
     }
 }
