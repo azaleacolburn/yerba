@@ -296,6 +296,7 @@ mod test {
     use core::alloc::Layout;
     use core::{alloc::Allocator, ptr::NonNull};
 
+    use crate::page_allocator::PageAllocator;
     use crate::{
         array_page_allocator::ArrayPageAllocator, mapped_allocator::MappedAllocator,
         util::PAGE_SIZE, with_page_size::WithPageSize,
@@ -375,6 +376,9 @@ mod test {
 
             let two = allocator.allocate(second_layout).unwrap().cast();
             allocator.deallocate(two, second_layout);
+
+            let three = allocator.allocate(layout).unwrap().cast();
+            allocator.deallocate(three, layout);
         }
     }
 
