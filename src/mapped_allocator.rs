@@ -21,7 +21,7 @@ impl MappedHeader {
     }
 }
 
-/// An allocator in the shape of a map.
+/// An allocator in the shape of a mapping between headers and data blocks.
 ///
 /// Holds a buffer of contiguous headers that each
 /// point to a not necessarily contiguous memory blocks.
@@ -83,6 +83,7 @@ where
     fn with_allocator(mut page_allocator: A) -> MappedAllocator<'a, A> {
         let page_size = page_allocator.get_page_size();
 
+        // The pages being allocated are overlapping here
         let blocks_buffer = unsafe { page_allocator.request_page_zeroed().cast::<u8>() };
         let headers_buffer = unsafe { page_allocator.request_page_zeroed().cast::<MappedHeader>() };
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
@@ -221,7 +222,7 @@ where
     // If none are extendible, then we allocate a completely new block
     /// Returns a safe place for a block of size `needed_space` to be alloced in
     /// or an `AllocError`
-    fn alloc_more_space(&self, needed_space: usize) -> Result<NonNull<u8>, AllocError> {
+    fn alloc_more_space(&self, needed_space: usize) -> Result<AllocSpaceResult, AllocError> {
         let mut header_ptr = self.headers.get();
         unsafe {
             let last_header_addr = self.headers().byte_add(self.header_buffer_size);
@@ -230,11 +231,19 @@ where
             while header_ptr < last_header_addr {
                 // We're going to make the same call to the page allocator multiple times, which sucks
                 let header = header_ptr.read();
-                let extended = allocator.extend_page(header.data.as_ptr(), needed_space);
+
+                let extended =
+                    allocator.extend_page(header.data.as_ptr(), needed_space - header.size);
                 // If the page has been extended, then we can just write to the last address after
                 // the current header_ptr
                 if extended {
-                    return Ok(header.last_addr());
+                    // For some `(*header_ptr).data` gets set to 0 by the `extend_page` call
+                    // I have no idea why since we're not even mapping that region of memory
+                    // Anyway, here we're resetting the data pointer which we should be able to do
+                    // since it's the same block that just got extended
+                    header_ptr.as_mut().data = header.data;
+                    header_ptr.as_mut().size = needed_space;
+                    return Ok(AllocSpaceResult::ExpandedBlock(header_ptr));
                 }
 
                 header_ptr = header_ptr.add(1);
@@ -243,6 +252,11 @@ where
 
         return Err(AllocError);
     }
+}
+
+enum AllocSpaceResult {
+    NewBlock(NonNull<u8>),
+    ExpandedBlock(NonNull<MappedHeader>),
 }
 
 // Where exactly the headers point to in memory isn't really something we care about, so merging
@@ -256,37 +270,54 @@ where
         let align = layout.align();
 
         let maybe_block = self.find_empty_block(size);
+        // Can't be `unwrap_or_else` because we want to early return
+        // if the `alloc_more_space` call fails
         let mut header_ptr = match maybe_block {
             Some(ptr) => ptr,
             None => {
                 // TODO Figure out how much space we need exactly (maybe there's some offset that
                 // makes this not work
-                let data_ptr = self.alloc_more_space(size)?;
-                self.add_header(data_ptr, size)
+                match self.alloc_more_space(size)? {
+                    AllocSpaceResult::NewBlock(data_ptr) => self.add_header(data_ptr, size),
+                    AllocSpaceResult::ExpandedBlock(header_ptr) => header_ptr,
+                }
             }
         };
+        println!(
+            "first header ptr: {:?}\nreal header  ptr: {:?}",
+            self.headers(),
+            header_ptr
+        );
 
         self.try_split_block(header_ptr, size);
         let header = unsafe { header_ptr.read() };
 
+        println!("{:?}", header);
         let alignment_offset = header.data.align_offset(align);
         let offset_data = unsafe { header.data.add(alignment_offset) };
         unsafe { header_ptr.as_mut().data = offset_data };
 
         let data_ptr = NonNull::slice_from_raw_parts(offset_data, size);
+        println!("ptr from alloc: {:?}", data_ptr);
 
         Ok(data_ptr)
     }
 
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, _layout: core::alloc::Layout) {
-        let mut header_ptr = self.find_specific_block(ptr).unwrap();
+        println!("ptr for dealloc: {:?}", ptr);
+        println!("first header: {:?}", unsafe { self.headers().read() });
+        let mut header_ptr = match self.find_specific_block(ptr) {
+            Some(ptr) => ptr,
+            None => {
+                panic!("Data pointer not found");
+                // TODO Once this bug is fixed, early return instead
+            }
+        };
         unsafe {
             header_ptr.as_mut().used = false;
         }
 
-        // TODO
-        // Writing automatic merging is going to be sort of painful and slow
-
+        // Automatic merging is going to be sort of painful and slow
         unsafe {
             let header = header_ptr.read();
             let get_next = |header: &MappedHeader| header.data.add(header.size);
@@ -335,7 +366,6 @@ mod test {
     use core::alloc::Layout;
     use core::{alloc::Allocator, ptr::NonNull};
 
-    use crate::page_allocator::PageAllocator;
     use crate::{
         array_page_allocator::ArrayPageAllocator, mapped_allocator::MappedAllocator,
         util::PAGE_SIZE, with_page_size::WithPageSize,
@@ -441,7 +471,7 @@ mod test {
     #[test]
     fn with_box() {
         let allocator = MappedAllocator::default();
-        let mut chunk = Box::<[u8; 16], MappedAllocator>::new_in([0; 16], allocator);
-        chunk[0] = 1;
+        // Somehow, the  box is writing into the header buffer
+        let mut chunk = Box::<[u8; 5000], MappedAllocator>::new_in([0; 5000], allocator);
     }
 }

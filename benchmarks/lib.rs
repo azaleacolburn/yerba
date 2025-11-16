@@ -5,6 +5,7 @@ use criterion::{criterion_group, criterion_main};
 pub mod builtin;
 pub mod contiguous_list;
 pub mod linked_list;
+pub mod mapped;
 pub mod stack;
 
 criterion_group!(
@@ -19,6 +20,11 @@ criterion_group!(
     linked_list::free,
     linked_list::alloc_free,
     linked_list::box_alloc_free,
+    mapped::create,
+    mapped::alloc,
+    mapped::free,
+    mapped::alloc_free,
+    mapped::box_alloc_free,
     stack::create,
     stack::free,
     stack::alloc_free,
