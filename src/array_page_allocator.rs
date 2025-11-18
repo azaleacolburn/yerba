@@ -5,7 +5,8 @@ use core::ffi::c_void;
 use core::ptr::slice_from_raw_parts_mut;
 use core::ptr::{self};
 use libc::{
-    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_READ,
+    PROT_WRITE,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
@@ -91,20 +92,16 @@ impl<'a> WithPageSize for ArrayPageAllocator<'a> {
             // The first pointer to the array of page pointers (PageArray)
             // This will be of type `*mut Page`
             let base_page_ptr =
-                map_arbitrary(page_size * 12).expect("Failed to reserve initial page array");
+                map_arbitrary(page_size).expect("Failed to reserve initial page array");
 
             let initial_page_array = PageArray {
                 // This is to establish provenance on our `UnsafeCell<[u8]>`
                 // In the future we might not do it this way
                 pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
-                pages_allocated: 12,
+                pages_allocated: 1,
                 pages_loaned: 0,
             };
             underlying_ptr_array[0] = initial_page_array;
-
-            let first_block_ptr =
-                map_fixed(base_page_ptr, page_size).expect("Failed to allocate first page");
-            assert_eq!(first_block_ptr, base_page_ptr);
 
             ArrayPageAllocator {
                 page_size,
@@ -140,7 +137,7 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
             base.cast(),
             size,
             PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED_NOREPLACE,
+            MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
             -1,
             0,
         )
@@ -163,30 +160,8 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         let page_array_count = self.page_array_count;
         assert!(page_array_count < 12);
 
-        let page_size = self.page_size;
-        let curr_page_array = self.current_page_array();
-
-        // let last_page_addr = curr_page_array.last_addr(page_size);
-        // if curr_page_array.pages_allocated > curr_page_array.pages_loaned {
-        //     curr_page_array.pages_loaned += 1;
-        //     let ptr: *mut u8 = curr_page_array
-        //         .pages
-        //         .wrapping_byte_add(page_size * curr_page_array.pages_loaned)
-        //         .cast();
-        //     return ptr;
-        // }
-        //
-        // match map_fixed(last_page_addr, page_size) {
-        //     Ok(page_ptr) => {
-        //         curr_page_array.pages_loaned += 1;
-        //         curr_page_array.increment_allocated_page_count();
-        //
-        //         page_ptr.cast()
-        //     }
-        //
-        //     Err(_) => {
         // This is so sketchy
-        let new_base_page = match map_arbitrary(self.page_size * 12) {
+        let new_base_page = match map_arbitrary(self.page_size) {
             Ok(ptr) => ptr,
             Err(_) => return ptr::null_mut(),
         };
@@ -194,7 +169,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         // which is bad I think
         let new_page_array = PageArray {
             pages: self.to_page_ptr(new_base_page),
-            pages_allocated: 12,
+            pages_allocated: 1,
             pages_loaned: 1,
         };
         let page_ptr = new_page_array.pages.cast();
@@ -203,6 +178,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         // Remeber that this extra layer of indirection is necessary for keeping pages
         // contiguous whenever possible
         self.page_array_buffer[self.page_array_count as usize] = new_page_array;
+        self.page_array_count += 1;
 
         page_ptr
         // }
@@ -268,6 +244,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
         println!("ptr {:?}", ptr);
         let last_addr = unsafe { ptr.byte_add(self.page_size) };
+        println!("last_addr {:?}", last_addr);
         match map_fixed(last_addr, added_size) {
             Ok(new_ptr) => {
                 assert_eq!(last_addr, new_ptr.cast());

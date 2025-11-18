@@ -226,9 +226,10 @@ where
         let mut header_ptr = self.headers.get();
         unsafe {
             let last_header_addr = self.headers().byte_add(self.header_buffer_size);
+            println!("{:?}", last_header_addr);
 
             let mut allocator = self.page_allocator.borrow_mut();
-            while header_ptr < last_header_addr {
+            while header_ptr <= last_header_addr {
                 // We're going to make the same call to the page allocator multiple times, which sucks
                 let header = header_ptr.read();
 
@@ -472,6 +473,6 @@ mod test {
     fn with_box() {
         let allocator = MappedAllocator::default();
         // Somehow, the  box is writing into the header buffer
-        let mut chunk = Box::<[u8; 5000], MappedAllocator>::new_in([0; 5000], allocator);
+        let chunk = Box::<[u8; 5000], MappedAllocator>::new_in([0; 5000], allocator);
     }
 }
