@@ -155,8 +155,8 @@ where
         }
 
         unsafe {
-            // If true, we have to reserve a new buffer then copy over
-            // all our headers
+            // If true, we have to reserve a new buffer, then copy over
+            // all of our headers
             //
             // Otherwise, our current header buffer has been expanded and we can safely write
             let extended = self.page_allocator.borrow_mut().extend_page(
@@ -218,9 +218,9 @@ where
     }
 
     // TODO
-    // For each header, we want to see if it's extendable, if it is we can return
-    // If none are extendible, then we allocate a completely new block
-    /// Returns a safe place for a block of size `needed_space` to be alloced in
+    // For each header, we want to see if it's extendable, if it is we can return.
+    // If none are extendable, then we allocate a completely new block
+    /// Returns a safe place for a block of size `needed_space` to be in
     /// or an `AllocError`
     fn alloc_more_space(&self, needed_space: usize) -> Result<AllocSpaceResult, AllocError> {
         let mut header_ptr = self.headers.get();
@@ -238,7 +238,7 @@ where
                 // If the page has been extended, then we can just write to the last address after
                 // the current header_ptr
                 if extended {
-                    // For some `(*header_ptr).data` gets set to 0 by the `extend_page` call
+                    // For some `(*header_ptr).data` gets set to 0 by the `extend_page` call.
                     // I have no idea why since we're not even mapping that region of memory
                     // Anyway, here we're resetting the data pointer which we should be able to do
                     // since it's the same block that just got extended

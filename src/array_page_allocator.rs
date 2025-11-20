@@ -4,10 +4,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr::slice_from_raw_parts_mut;
 use core::ptr::{self};
-use libc::{
-    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_READ,
-    PROT_WRITE,
-};
+use libc::{self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -20,9 +17,9 @@ type Page = UnsafeCell<[u8]>;
 /// The pages are not guaranteed to be contiguous to each other, nor are they guaranteed
 /// Unless a page larger than the default size, in which case it will be allocated
 ///
-/// Pages are not guaranteed to be contiguous with respect to each other
+/// Pages are not guaranteed to be contiguous with respect to each other.
 /// The allocator will attempt to make them contiguous, however, if the allocation of a contiguous
-/// block with mmap(fixed) fails, a new base of contiguous pages will be allocated
+/// block with mmap(fixed) fails, a new base of contiguous pages will be allocated.
 pub struct ArrayPageAllocator<'a> {
     page_size: usize,
     // Represents the number of page_arrays we've allocated
@@ -160,7 +157,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         let page_array_count = self.page_array_count;
         assert!(page_array_count < 12);
 
-        // This is so sketchy
         let new_base_page = match map_arbitrary(self.page_size) {
             Ok(ptr) => ptr,
             Err(_) => return ptr::null_mut(),
@@ -175,7 +171,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         let page_ptr = new_page_array.pages.cast();
 
         // Write the address of the new base page array to the page array buffer
-        // Remeber that this extra layer of indirection is necessary for keeping pages
+        // Remember that this extra layer of indirection is necessary for keeping pages
         // contiguous whenever possible
         self.page_array_buffer[self.page_array_count as usize] = new_page_array;
         self.page_array_count += 1;
@@ -245,7 +241,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         println!("ptr {:?}", ptr);
         let last_addr = unsafe { ptr.byte_add(self.page_size) };
         println!("last_addr {:?}", last_addr);
-        match map_fixed(last_addr, added_size) {
+        match map_fixed(last_addr, self.page_size) {
             Ok(new_ptr) => {
                 assert_eq!(last_addr, new_ptr.cast());
                 true
