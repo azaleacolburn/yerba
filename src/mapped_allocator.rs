@@ -86,6 +86,7 @@ where
         // The pages being allocated are overlapping here
         let blocks_buffer = unsafe { page_allocator.request_page_zeroed().cast::<u8>() };
         let headers_buffer = unsafe { page_allocator.request_page_zeroed().cast::<MappedHeader>() };
+        println!("blocks {:?} headers {:?}", blocks_buffer, headers_buffer);
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
 
         let initial_header = MappedHeader {
@@ -296,7 +297,11 @@ where
         println!("{:?}", header);
         let alignment_offset = header.data.align_offset(align);
         let offset_data = unsafe { header.data.add(alignment_offset) };
-        unsafe { header_ptr.as_mut().data = offset_data };
+        unsafe {
+            let ptr = header_ptr.as_mut();
+            ptr.data = offset_data;
+            ptr.used = true;
+        };
 
         let data_ptr = NonNull::slice_from_raw_parts(offset_data, size);
         println!("ptr from alloc: {:?}", data_ptr);
@@ -365,6 +370,7 @@ impl<'a> Default for MappedAllocator<'a> {
 #[cfg(test)]
 mod test {
     use core::alloc::Layout;
+    use core::hint::black_box;
     use core::{alloc::Allocator, ptr::NonNull};
 
     use crate::{
@@ -472,7 +478,8 @@ mod test {
     #[test]
     fn with_box() {
         let allocator = MappedAllocator::default();
-        // Somehow, the  box is writing into the header buffer
+        // Somehow, the box is writing into the header buffer
         let chunk = Box::<[u8; 5000], MappedAllocator>::new_in([0; 5000], allocator);
+        black_box(chunk);
     }
 }

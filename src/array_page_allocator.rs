@@ -1,10 +1,13 @@
 use crate::page_allocator::PageAllocator;
 use crate::with_page_size::WithPageSize;
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
+use core::ffi::{c_int, c_void};
 use core::ptr::slice_from_raw_parts_mut;
 use core::ptr::{self};
-use libc::{self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use libc::{
+    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, MAP_SHARED,
+    MREMAP_FIXED, PROT_READ, PROT_WRITE, mremap,
+};
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -53,7 +56,7 @@ impl PageArray {
         self.pages_allocated = n.into();
     }
 
-    fn _decrement_loaned_page_count(&mut self) {
+    fn decrement_loaned_page_count(&mut self) {
         self.pages_allocated -= 1;
     }
 
@@ -88,38 +91,29 @@ impl<'a> WithPageSize for ArrayPageAllocator<'a> {
 
             // The first pointer to the array of page pointers (PageArray)
             // This will be of type `*mut Page`
-            let base_page_ptr =
-                map_arbitrary(page_size).expect("Failed to reserve initial page array");
+            // let base_page_ptr =
+            //     map_arbitrary(page_size).expect("Failed to reserve initial page array");
 
-            let initial_page_array = PageArray {
-                // This is to establish provenance on our `UnsafeCell<[u8]>`
-                // In the future we might not do it this way
-                pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
-                pages_allocated: 1,
-                pages_loaned: 0,
-            };
-            underlying_ptr_array[0] = initial_page_array;
+            // let initial_page_array = PageArray {
+            //     // This is to establish provenance on our `UnsafeCell<[u8]>`
+            //     // In the future we might not do it this way
+            //     pages: slice_from_raw_parts_mut(base_page_ptr, page_size) as *mut Page,
+            //     pages_allocated: 1,
+            //     pages_loaned: 0,
+            // };
+            // underlying_ptr_array[0] = initial_page_array;
 
             ArrayPageAllocator {
                 page_size,
-                page_array_count: 1,
+                page_array_count: 0,
                 page_array_buffer: underlying_ptr_array,
             }
         }
     }
 }
 
-fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
-    let ptr = unsafe {
-        libc::mmap(
-            ptr::null_mut(),
-            size,
-            PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_PRIVATE,
-            -1,
-            0,
-        )
-    };
+fn map_generic(base: *mut c_void, size: usize, flags: c_int) -> Result<*mut c_void, ()> {
+    let ptr = unsafe { libc::mmap(base, size, PROT_READ | PROT_WRITE, flags, -1, 0) };
 
     if ptr == MAP_FAILED {
         return Err(());
@@ -128,57 +122,64 @@ fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
     Ok(ptr)
 }
 
-fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
-    let ptr = unsafe {
-        libc::mmap(
-            base.cast(),
-            size,
-            PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-            -1,
-            0,
-        )
-    };
-    if ptr == MAP_FAILED {
-        return Err(());
-    };
+fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
+    map_generic(ptr::null_mut(), size, MAP_ANONYMOUS | MAP_SHARED)
+}
 
-    Ok(ptr)
+fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
+    map_generic(
+        base.cast(),
+        size,
+        MAP_ANONYMOUS | MAP_SHARED | MAP_FIXED_NOREPLACE,
+    )
 }
 
 impl<'a> ArrayPageAllocator<'a> {
     fn current_page_array(&mut self) -> &mut PageArray {
         &mut self.page_array_buffer[self.page_array_count as usize - 1]
     }
+
+    fn find<T>(&mut self, ptr: *mut T) -> Option<&mut PageArray> {
+        for i in 0..self.page_array_count as usize {
+            let page_array = &self.page_array_buffer[i];
+
+            let buf_ptr: *mut T = page_array.pages.cast();
+            let end = unsafe { buf_ptr.byte_add(page_array.pages_loaned * self.page_size) };
+            // println!(
+            //     "start {:?} end {:?} ptr {:?} loaned {:?}",
+            //     buf_ptr, end, ptr, page_array.pages_loaned
+            // );
+
+            if (buf_ptr..end).contains(&ptr) {
+                return Some(&mut self.page_array_buffer[i]);
+            }
+        }
+
+        None
+    }
 }
 
 impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     unsafe fn request_page(&mut self) -> *mut u8 {
-        let page_array_count = self.page_array_count;
-        assert!(page_array_count < 12);
+        let page_array_count = self.page_array_count as usize;
+        assert!(page_array_count < 12); // TODO Write code to resize header buffer
 
-        let new_base_page = match map_arbitrary(self.page_size) {
+        let new_base_page = match map_arbitrary(self.page_size * 4) {
             Ok(ptr) => ptr,
             Err(_) => return ptr::null_mut(),
         };
-        // `new_base_page` seems to be a lower value than `last_page_addr`
-        // which is bad I think
+
         let new_page_array = PageArray {
             pages: self.to_page_ptr(new_base_page),
-            pages_allocated: 1,
+            pages_allocated: 4,
             pages_loaned: 1,
         };
-        let page_ptr = new_page_array.pages.cast();
 
         // Write the address of the new base page array to the page array buffer
-        // Remember that this extra layer of indirection is necessary for keeping pages
-        // contiguous whenever possible
-        self.page_array_buffer[self.page_array_count as usize] = new_page_array;
+        self.page_array_buffer[page_array_count] = new_page_array;
         self.page_array_count += 1;
 
-        page_ptr
-        // }
-        // }
+        new_base_page.cast()
     }
 
     unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
@@ -238,15 +239,37 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     }
 
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
-        println!("ptr {:?}", ptr);
-        let last_addr = unsafe { ptr.byte_add(self.page_size) };
-        println!("last_addr {:?}", last_addr);
-        match map_fixed(last_addr, self.page_size) {
-            Ok(new_ptr) => {
-                assert_eq!(last_addr, new_ptr.cast());
+        let page_size = self.page_size;
+        let page_array = self.find(ptr).unwrap();
+        if page_array.pages_allocated > page_array.pages_loaned {
+            let diff = (page_array.pages_allocated - page_array.pages_loaned) * page_size;
+            if diff >= added_size {
+                page_array.increment_loaned_page_count();
+                return true;
+            }
+
+            page_array.pages_allocated = page_array.pages_loaned;
+        }
+
+        let last_addr = unsafe { ptr.byte_add(page_size) };
+
+        let old_size = page_array.pages_loaned * page_size;
+        page_array.increment_loaned_page_count();
+        let new_size = page_array.pages_loaned * page_size;
+
+        match unsafe { mremap(ptr.cast(), old_size, new_size, MREMAP_FIXED) } {
+            MAP_FAILED => {
+                println!("Remap Failed");
+                page_array.decrement_loaned_page_count();
+                false
+            }
+            new_ptr => {
+                assert_eq!(new_ptr.cast(), ptr);
+                page_array.increment_loaned_page_count();
+                page_array.increment_allocated_page_count();
+
                 true
             }
-            Err(_) => false,
         }
     }
 }
