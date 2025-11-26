@@ -66,7 +66,7 @@ where
 {
     headers: Cell<NonNull<MappedHeader>>,
     header_buffer_size: usize,
-    headers_allocated: usize,
+    headers_allocated: Cell<usize>,
 
     page_allocator: RefCell<A>,
     marker: PhantomData<&'a A>,
@@ -101,7 +101,7 @@ where
             Self {
                 headers: Cell::new(NonNull::new_unchecked(headers_buffer)),
                 header_buffer_size: page_size,
-                headers_allocated: 1,
+                headers_allocated: Cell::new(1),
                 page_allocator: RefCell::new(page_allocator),
                 marker: PhantomData,
             }
@@ -124,6 +124,7 @@ where
         }
 
         let new_data_ptr = unsafe { header.data.byte_add(new_size) };
+        println!("split block size {:?}", next_size);
         self.add_header(new_data_ptr, next_size);
 
         unsafe {
@@ -134,7 +135,7 @@ where
     fn header_space_remaining(&self) -> bool {
         unsafe {
             self.headers.get().byte_add(self.header_buffer_size)
-                > self.headers.get().add(self.headers_allocated)
+                > self.headers.get().add(self.headers_allocated.get())
         }
     }
 
@@ -148,15 +149,16 @@ where
 
         if self.header_space_remaining() {
             unsafe {
-                let header_ptr = self.headers.get().add(self.headers_allocated);
+                let header_ptr = self.headers().add(self.headers_allocated.get());
                 header_ptr.write(header);
+                self.headers_allocated.update(|n| n + 1);
 
                 return header_ptr;
             }
         }
 
         unsafe {
-            // If true, we have to reserve a new buffer, then copy over
+            // If otherwise, we have to reserve a new buffer, then copy over
             // all of our headers
             //
             // Otherwise, our current header buffer has been expanded and we can safely write
@@ -176,14 +178,14 @@ where
                 core::ptr::copy_nonoverlapping(
                     self.headers().as_ptr(),
                     page,
-                    self.headers_allocated,
+                    self.headers_allocated.get(),
                 );
                 self.headers.set(NonNull::new_unchecked(page));
             }
 
             // Then, because we know we have enough space, we can just write our header as the last
             // item in the headers buffer
-            let header_ptr = self.headers().add(self.headers_allocated);
+            let header_ptr = self.headers().add(self.headers_allocated.get());
             header_ptr.write(header);
 
             header_ptr
@@ -194,26 +196,24 @@ where
         &self,
         predicate: impl Fn(&MappedHeader) -> bool,
     ) -> Option<NonNull<MappedHeader>> {
-        unsafe {
-            let mut header_ptr = self.headers();
-            let mut header = header_ptr.read();
+        let base_ptr = self.headers();
+        let mut header;
 
-            let last_addr = header_ptr.byte_add(self.header_buffer_size);
-
-            while !predicate(&header) {
-                println!("header search: {:?}", header);
-                header_ptr = header_ptr.add(1);
-
-                if header_ptr > last_addr {
-                    return None;
-                }
-
+        for i in 0..self.headers_allocated.get() {
+            unsafe {
+                let header_ptr = base_ptr.add(i);
                 header = header_ptr.read();
-            }
+                println!("header search: {:?}", header);
+                println!("header ptr: {:?}", header_ptr);
 
-            println!("t");
-            Some(header_ptr)
+                if predicate(&header) {
+                    println!("Found header");
+                    return Some(header_ptr);
+                }
+            }
         }
+
+        None
     }
 
     fn find_specific_block(&self, ptr: NonNull<u8>) -> Option<NonNull<MappedHeader>> {
@@ -226,35 +226,27 @@ where
     /// Returns a safe place for a block of size `needed_space` to be in
     /// or an `AllocError`
     fn alloc_more_space(&self, needed_space: usize) -> Result<AllocSpaceResult, AllocError> {
-        let mut header_ptr = self.headers.get();
-        unsafe {
-            let last_header_addr = self.headers().byte_add(self.header_buffer_size);
-            println!("{:?}", last_header_addr);
+        let extendable = |header: &MappedHeader| unsafe {
+            !header.used
+                && self
+                    .page_allocator
+                    .borrow_mut()
+                    .extend_page(header.data.as_ptr(), needed_space - header.size)
+        };
 
-            let mut allocator = self.page_allocator.borrow_mut();
-            while header_ptr <= last_header_addr {
-                // We're going to make the same call to the page allocator multiple times, which sucks
-                let header = header_ptr.read();
-
-                let extended =
-                    allocator.extend_page(header.data.as_ptr(), needed_space - header.size);
-                // If the page has been extended, then we can just write to the last address after
-                // the current header_ptr
-                if extended {
-                    // For some `(*header_ptr).data` gets set to 0 by the `extend_page` call.
-                    // I have no idea why since we're not even mapping that region of memory
-                    // Anyway, here we're resetting the data pointer which we should be able to do
-                    // since it's the same block that just got extended
-                    header_ptr.as_mut().data = header.data;
-                    header_ptr.as_mut().size = needed_space;
-                    return Ok(AllocSpaceResult::ExpandedBlock(header_ptr));
+        match self.find_block(extendable) {
+            Some(mut header_ptr) => {
+                unsafe {
+                    header_ptr.as_mut().size += needed_space;
                 }
+                Ok(AllocSpaceResult::ExpandedBlock(header_ptr))
+            }
+            None => {
+                // self.add_header(data, size)
 
-                header_ptr = header_ptr.add(1);
+                Err(AllocError)
             }
         }
-
-        return Err(AllocError);
     }
 }
 
@@ -281,6 +273,7 @@ where
             None => {
                 // TODO Figure out how much space we need exactly (maybe there's some offset that
                 // makes this not work
+                println!("GETTING MORE SPACE");
                 match self.alloc_more_space(size)? {
                     AllocSpaceResult::NewBlock(data_ptr) => self.add_header(data_ptr, size),
                     AllocSpaceResult::ExpandedBlock(header_ptr) => header_ptr,
@@ -311,7 +304,7 @@ where
         Ok(data_ptr)
     }
 
-    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, _layout: core::alloc::Layout) {
+    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
         println!("ptr for dealloc: {:?}", ptr);
         println!("first header: {:?}", unsafe { self.headers().read() });
         let mut header_ptr = match self.find_specific_block(ptr) {
@@ -325,16 +318,22 @@ where
             header_ptr.as_mut().used = false;
         }
 
-        // Automatic merging is going to be sort of painful and slow
+        // Automatic merging is sort of painful and slow
         unsafe {
             let header = header_ptr.read();
-            let get_next = |header: &MappedHeader| header.data.add(header.size);
+
+            if layout.size() != header.size {
+                println!("Layout of wrong size");
+                // TODO Figure out what to do in this case
+                // return;
+            }
+            let get_next_block = |header: &MappedHeader| header.data.add(header.size);
 
             let is_adjacent_after = |searching_header: &MappedHeader| {
-                !searching_header.used && get_next(&header) == searching_header.data
+                !searching_header.used && get_next_block(&header) == searching_header.data
             };
             let is_adjacent_before = |searching_header: &MappedHeader| {
-                !searching_header.used && get_next(&searching_header) == header.data
+                !searching_header.used && get_next_block(&searching_header) == header.data
             };
 
             // This traverses twice, which is annoying
@@ -434,8 +433,9 @@ mod test {
 
         unsafe {
             let mut one = allocator.allocate(layout).unwrap().cast();
-            // let two = allocator.allocate(layout).unwrap().cast();
+            let two: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
 
+            println!("one: {:?} two {:?}\n", one, two);
             one = allocator.grow(one, layout, new_layout).unwrap().cast();
             allocator.deallocate(one, new_layout);
             // allocator.deallocate(two, new_layout);

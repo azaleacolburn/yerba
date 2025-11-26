@@ -30,6 +30,7 @@ pub struct ArrayPageAllocator<'a> {
     page_array_buffer: &'a mut [PageArray],
 }
 
+#[derive(Debug)]
 struct PageArray {
     // Secretly, this is actually an array of pages
     // This is to avoid using an extra usize of space, since we functionally need both
@@ -53,15 +54,15 @@ impl PageArray {
     }
 
     fn _set_loaned_page_count(&mut self, n: impl Into<usize>) {
-        self.pages_allocated = n.into();
+        self.pages_loaned = n.into();
     }
 
     fn decrement_loaned_page_count(&mut self) {
-        self.pages_allocated -= 1;
+        self.pages_loaned -= 1;
     }
 
     fn increment_loaned_page_count(&mut self) {
-        self.pages_allocated += 1;
+        self.pages_loaned += 1;
     }
 
     fn _set_allocated_page_count(&mut self, n: impl Into<usize>) {
@@ -239,16 +240,18 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     }
 
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
+        println!("extending page");
         let page_size = self.page_size;
         let page_array = self.find(ptr).unwrap();
         if page_array.pages_allocated > page_array.pages_loaned {
             let diff = (page_array.pages_allocated - page_array.pages_loaned) * page_size;
             if diff >= added_size {
                 page_array.increment_loaned_page_count();
+
                 return true;
             }
 
-            page_array.pages_allocated = page_array.pages_loaned;
+            page_array.pages_loaned = page_array.pages_allocated;
         }
 
         let last_addr = unsafe { ptr.byte_add(page_size) };
@@ -265,7 +268,7 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
             }
             new_ptr => {
                 assert_eq!(new_ptr.cast(), ptr);
-                page_array.increment_loaned_page_count();
+                // page_array.increment_loaned_page_count();
                 page_array.increment_allocated_page_count();
 
                 true
@@ -285,6 +288,7 @@ impl<'a> Drop for ArrayPageAllocator<'a> {
         let page_blocks = &self.page_array_buffer;
         for i in 0..(self.page_array_count as usize) {
             let page_array = &page_blocks[i];
+            println!("here: {:?}", page_array);
             unsafe {
                 libc::munmap(
                     page_array.pages.cast(),
