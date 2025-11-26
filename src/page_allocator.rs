@@ -1,6 +1,8 @@
+use core::alloc::AllocError;
+
 pub trait PageAllocator {
-    unsafe fn request_page(&mut self) -> *mut u8;
-    unsafe fn request_page_zeroed(&mut self) -> *mut u8;
+    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError>;
+    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError>;
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
     /// Attempts to extend a given allocated block by `added_size`, returns true if it was able to
     /// extend the block, false otherwise
@@ -12,7 +14,6 @@ pub trait PageAllocator {
     /// Creates a "by reference" adapter for this instance of `PageAllocator`.
     ///
     /// The returned adapter also implements `PageAllocator` and will simply borrow this.
-    #[inline(always)]
     fn by_ref(&self) -> &Self
     where
         Self: Sized,
@@ -26,12 +27,12 @@ where
     A: PageAllocator,
 {
     #[inline]
-    unsafe fn request_page(&mut self) -> *mut u8 {
+    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
         unsafe { (**self).request_page() }
     }
 
     #[inline]
-    unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
+    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
         unsafe { (**self).request_page_zeroed() }
     }
 

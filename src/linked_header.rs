@@ -1,4 +1,9 @@
-use core::{alloc::Layout, num::NonZeroUsize, ops::Deref, ptr::NonNull};
+use core::{
+    alloc::{AllocError, Layout},
+    num::NonZeroUsize,
+    ops::Deref,
+    ptr::NonNull,
+};
 
 use crate::{
     inline_header::InlineHeader,
@@ -18,21 +23,23 @@ pub struct UnderlyingLinkedHeader {
 
 impl Default for UnderlyingLinkedHeader {
     fn default() -> Self {
-        UnderlyingLinkedHeader::with_size(PAGE_SIZE - size_of::<UnderlyingLinkedHeader>())
+        Self::with_size(PAGE_SIZE - size_of::<Self>())
     }
 }
 
 impl UnderlyingLinkedHeader {
-    pub fn with_size(size: usize) -> UnderlyingLinkedHeader {
-        UnderlyingLinkedHeader {
+    #[must_use]
+    pub const fn with_size(size: usize) -> Self {
+        Self {
             size,
             offset: 0,
             next: None,
         }
     }
 
-    pub fn with_offset(size: usize, offset: usize) -> UnderlyingLinkedHeader {
-        UnderlyingLinkedHeader {
+    #[must_use]
+    pub const fn with_offset(size: usize, offset: usize) -> Self {
+        Self {
             size,
             offset,
             next: None,
@@ -40,19 +47,18 @@ impl UnderlyingLinkedHeader {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkedHeader(NonNull<UnderlyingLinkedHeader>);
 
 impl InlineHeader for LinkedHeader {
     type Header = UnderlyingLinkedHeader;
 
-    fn new<T: ?Sized>(ptr: *mut T) -> Self {
-        if ptr.is_null() {
-            panic!("Cannot create ")
-        }
+    unsafe fn new<T: ?Sized>(ptr: *mut T) -> Self {
+        assert!(!ptr.is_null(), "Cannot create LinkedHeader from null ptr");
+
         let not_null: NonNull<UnderlyingLinkedHeader> =
             unsafe { NonNull::new_unchecked(ptr).cast() };
-        LinkedHeader(not_null)
+        Self(not_null)
     }
 
     fn get_offset(&self) -> usize {
@@ -76,7 +82,7 @@ impl InlineHeader for LinkedHeader {
         unsafe {
             let k = size_of::<usize>() * 8 - 1;
             self.0.as_mut().offset &= 0 << k;
-            self.0.as_mut().offset &= (used as usize) << k;
+            self.0.as_mut().offset &= usize::from(used) << k;
         }
     }
 
@@ -93,8 +99,8 @@ impl InlineHeader for LinkedHeader {
         unsafe { self.0.as_mut().size = size }
     }
 
-    fn set(&mut self, ptr: LinkedHeader) {
-        self.0 = ptr.0
+    fn set(&mut self, ptr: Self) {
+        self.0 = ptr.0;
     }
 
     fn get_data(&self) -> NonNull<u8> {
@@ -119,8 +125,12 @@ impl InlineHeader for LinkedHeader {
         }
         let next = unsafe { self.next_unchecked() };
         assert_eq!(next, *last_header);
-        let can_merge_blocks =
-            unsafe { self.next_unchecked().addr() == NonZeroUsize::new(self.last_addr()).unwrap() };
+
+        let Some(last_addr) = NonZeroUsize::new(self.last_addr()) else {
+            println!("Last Addr is Null");
+            return false;
+        };
+        let can_merge_blocks = unsafe { self.next_unchecked().addr() == last_addr };
         if can_merge_blocks {
             let new_size = size_of::<UnderlyingLinkedHeader>()
                 + self.get_offset()
@@ -152,7 +162,7 @@ impl InlineHeader for LinkedHeader {
         );
 
         unsafe {
-            let new_header_ptr = LinkedHeader(self.byte_add(offset + new_size));
+            let new_header_ptr = Self(self.byte_add(offset + new_size));
             new_header_ptr.write(new_header);
 
             self.set_next_some(new_header_ptr);
@@ -170,13 +180,13 @@ impl InlineHeader for LinkedHeader {
 
     fn initialize_header(
         mut page_allocator: impl crate::page_allocator::PageAllocator,
-    ) -> *mut Self::Header {
+    ) -> Result<*mut Self::Header, AllocError> {
         let base_header = UnderlyingLinkedHeader::with_size(page_allocator.get_page_size());
         unsafe {
-            let page: *mut UnderlyingLinkedHeader = page_allocator.request_page_zeroed().cast();
+            let page: *mut UnderlyingLinkedHeader = page_allocator.request_page_zeroed()?.cast();
             page.write(base_header);
 
-            page
+            Ok(page)
         }
     }
 
@@ -187,12 +197,12 @@ impl InlineHeader for LinkedHeader {
 
 impl From<NonNull<UnderlyingLinkedHeader>> for LinkedHeader {
     fn from(value: NonNull<UnderlyingLinkedHeader>) -> Self {
-        LinkedHeader(value)
+        Self(value)
     }
 }
 
 impl LinkedHeader {
-    fn is_last_block(&self) -> bool {
+    fn is_last_block(self) -> bool {
         let next = unsafe { self.read().next };
         match next {
             Some(_) => true,
@@ -200,13 +210,13 @@ impl LinkedHeader {
         }
     }
 
-    fn set_next_some(&mut self, next: LinkedHeader) {
+    const fn set_next_some(&mut self, next: Self) {
         unsafe {
             self.0.as_mut().next = Some(next);
         }
     }
 
-    fn set_next_none(&mut self) {
+    const fn set_next_none(&mut self) {
         unsafe {
             self.0.as_mut().next = None;
         }
@@ -315,7 +325,8 @@ mod test {
         let mut page_allocator = ArrayPageAllocator::default();
         let allocator = ListAllocator::<&mut ArrayPageAllocator, LinkedHeader>::with_allocator(
             &mut page_allocator,
-        );
+        )
+        .unwrap();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 

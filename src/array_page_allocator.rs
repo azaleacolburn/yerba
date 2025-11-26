@@ -8,6 +8,7 @@ use libc::{
     self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_SHARED, MREMAP_FIXED, PROT_READ,
     PROT_WRITE, mremap,
 };
+use std::alloc::AllocError;
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -26,8 +27,8 @@ type Page = UnsafeCell<[u8]>;
 pub struct ArrayPageAllocator<'a> {
     page_size: usize,
     // Represents the number of page_arrays we've allocated
-    page_array_count: u8,
-    page_array_buffer: &'a mut [PageArray],
+    array_count: u8,
+    array_buffer: &'a mut [PageArray],
 }
 
 #[derive(Debug)]
@@ -38,57 +39,50 @@ struct PageArray {
     //
     // If `pages` where of type `*mut [Page]`, we would also have to store the page_size as the
     // wide pointer's provenance, which we're already storing in `PageAllocator`, our parent struct
-    pages: *mut Page,
-    pages_loaned: usize,
-    pages_allocated: usize,
+    buffer: *mut Page,
+    loaned: usize,
+    allocated: usize,
 }
 
 impl PageArray {
-    fn last_addr(&self, page_size: usize) -> *mut c_void {
-        unsafe {
-            let first_page_ptr = self.pages.cast::<*mut Page>();
-            first_page_ptr
-                .byte_add(page_size * self.pages_allocated - 1)
-                .cast()
-        }
+    const fn last_addr(&self, page_size: usize) -> *mut c_void {
+        unsafe { self.buffer.byte_add(page_size * self.allocated - 1).cast() }
     }
 
     fn _set_loaned_page_count(&mut self, n: impl Into<usize>) {
-        self.pages_loaned = n.into();
+        self.loaned = n.into();
     }
 
-    fn decrement_loaned_page_count(&mut self) {
-        self.pages_loaned -= 1;
+    const fn decrement_loaned_page_count(&mut self) {
+        self.loaned -= 1;
     }
 
-    fn increment_loaned_page_count(&mut self) {
-        self.pages_loaned += 1;
+    const fn increment_loaned_page_count(&mut self) {
+        self.loaned += 1;
     }
 
     fn _set_allocated_page_count(&mut self, n: impl Into<usize>) {
-        self.pages_allocated = n.into();
+        self.allocated = n.into();
     }
 
-    fn decrement_allocated_page_count(&mut self) {
-        self.pages_allocated -= 1;
+    const fn decrement_allocated_page_count(&mut self) {
+        self.allocated -= 1;
     }
 
-    fn increment_allocated_page_count(&mut self) {
-        self.pages_allocated += 1;
+    const fn increment_allocated_page_count(&mut self) {
+        self.allocated += 1;
     }
 }
 
-impl<'a> WithPageSize for ArrayPageAllocator<'a> {
-    fn with_page_size(page_size: usize) -> Self {
+impl WithPageSize for ArrayPageAllocator<'_> {
+    fn with_page_size(page_size: usize) -> Result<Self, AllocError> {
         unsafe {
             // Create the underlying block for storing pointers to arrays of blocks and the sizes
             // of those arrays
             // This will be of type `*mut [PageArray]`
-            let page_ptr_ptr = map_arbitrary(size_of::<PageArray>() * 12)
-                .expect("Failed to reserve the underlying pointer array");
+            let page_ptr_ptr = map_arbitrary(size_of::<PageArray>() * 12)?;
             let underlying_ptr_array =
-                &mut *(slice_from_raw_parts_mut(page_ptr_ptr as *mut u8, page_size)
-                    as *mut [PageArray]);
+                &mut *slice_from_raw_parts_mut(page_ptr_ptr.cast(), page_size);
 
             // The first pointer to the array of page pointers (PageArray)
             // This will be of type `*mut Page`
@@ -104,30 +98,30 @@ impl<'a> WithPageSize for ArrayPageAllocator<'a> {
             // };
             // underlying_ptr_array[0] = initial_page_array;
 
-            ArrayPageAllocator {
+            Ok(ArrayPageAllocator {
                 page_size,
-                page_array_count: 0,
-                page_array_buffer: underlying_ptr_array,
-            }
+                array_count: 0,
+                array_buffer: underlying_ptr_array,
+            })
         }
     }
 }
 
-fn map_generic(base: *mut c_void, size: usize, flags: c_int) -> Result<*mut c_void, ()> {
+fn map_generic(base: *mut c_void, size: usize, flags: c_int) -> Result<*mut c_void, AllocError> {
     let ptr = unsafe { libc::mmap(base, size, PROT_READ | PROT_WRITE, flags, -1, 0) };
 
     if ptr == MAP_FAILED {
-        return Err(());
-    };
+        return Err(AllocError);
+    }
 
     Ok(ptr)
 }
 
-fn map_arbitrary(size: usize) -> Result<*mut c_void, ()> {
+fn map_arbitrary(size: usize) -> Result<*mut c_void, AllocError> {
     map_generic(ptr::null_mut(), size, MAP_ANONYMOUS | MAP_SHARED)
 }
 
-fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
+fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, AllocError> {
     map_generic(
         base.cast(),
         size,
@@ -135,20 +129,20 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, ()> {
     )
 }
 
-impl<'a> ArrayPageAllocator<'a> {
+impl ArrayPageAllocator<'_> {
     fn current_page_array(&mut self) -> &mut PageArray {
-        &mut self.page_array_buffer[self.page_array_count as usize - 1]
+        &mut self.array_buffer[self.array_count as usize - 1]
     }
 
     fn find<T>(&mut self, ptr: *mut T) -> Option<&mut PageArray> {
-        for i in 0..self.page_array_count as usize {
-            let page_array = &self.page_array_buffer[i];
+        for i in 0..self.array_count as usize {
+            let page_array = &self.array_buffer[i];
 
-            let buf_ptr: *mut T = page_array.pages.cast();
-            let end = unsafe { buf_ptr.byte_add(page_array.pages_loaned * self.page_size) };
+            let buf_ptr: *mut T = page_array.buffer.cast();
+            let end = unsafe { buf_ptr.byte_add(page_array.loaned * self.page_size) };
 
             if (buf_ptr..end).contains(&ptr) {
-                return Some(&mut self.page_array_buffer[i]);
+                return Some(&mut self.array_buffer[i]);
             }
         }
 
@@ -156,38 +150,36 @@ impl<'a> ArrayPageAllocator<'a> {
     }
 }
 
-impl<'a> PageAllocator for ArrayPageAllocator<'a> {
-    unsafe fn request_page(&mut self) -> *mut u8 {
-        let page_array_count = self.page_array_count as usize;
-        assert!(page_array_count < 12); // TODO Write code to resize header buffer
+impl PageAllocator for ArrayPageAllocator<'_> {
+    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
+        let page_array_count = self.array_count as usize;
+        assert!(page_array_count < 12);
+        // TODO Write code to resize header buffer
 
-        let new_base_page = match map_arbitrary(self.page_size * 4) {
-            Ok(ptr) => ptr,
-            Err(_) => return ptr::null_mut(),
+        let Ok(new_base_page) = map_arbitrary(self.page_size * 4) else {
+            return Err(AllocError);
         };
 
         let new_page_array = PageArray {
-            pages: self.to_page_ptr(new_base_page),
-            pages_allocated: 4,
-            pages_loaned: 1,
+            buffer: self.to_page_ptr(new_base_page),
+            allocated: 4,
+            loaned: 1,
         };
 
         // Write the address of the new base page array to the page array buffer
-        self.page_array_buffer[page_array_count] = new_page_array;
-        self.page_array_count += 1;
+        self.array_buffer[page_array_count] = new_page_array;
+        self.array_count += 1;
 
-        new_base_page.cast()
+        Ok(new_base_page.cast())
     }
 
-    unsafe fn request_page_zeroed(&mut self) -> *mut u8 {
+    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
         unsafe {
-            let address = self.request_page();
-            if address.is_null() {
-                return ptr::null_mut();
-            }
+            let address = self.request_page()?;
+            assert!(!address.is_null());
             address.write_bytes(0, self.page_size);
 
-            address
+            Ok(address)
         }
     }
 
@@ -197,12 +189,13 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
         // TODO Figure out how to effectively clear the pointer to this underlying data in our
         // pointer array
         // Iterate over the page arrays and find which one holds the deallocated pointer
-        for i in 0..self.page_array_count as usize {
-            let page_array = &mut self.page_array_buffer[i];
-            let page_count = page_array.pages_allocated;
-            let lower = page_array.pages.addr();
+        for i in 0..self.array_count as usize {
+            let page_array = &mut self.array_buffer[i];
+            let page_count = page_array.allocated;
+
+            let lower = page_array.buffer.addr();
             let upper = lower + page_count * self.page_size;
-            if ptr.addr() > lower && ptr.addr() < upper {
+            if (lower..upper).contains(&ptr.addr()) {
                 page_array.decrement_allocated_page_count();
                 unsafe {
                     ptr.write_bytes(0, self.page_size);
@@ -212,12 +205,12 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     }
 
     fn get_pages_allocated(&self) -> usize {
-        let page_array_count = self.page_array_count as usize;
+        let page_array_count = self.array_count as usize;
 
         // TODO Make code style choices
         (0..page_array_count)
             .into_iter()
-            .map(|i| self.page_array_buffer[i].pages_loaned)
+            .map(|i| self.array_buffer[i].loaned)
             .sum()
     }
 
@@ -227,21 +220,25 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
 
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
         let page_size = self.page_size;
-        let page_array = self.find(ptr).unwrap();
-        if page_array.pages_allocated > page_array.pages_loaned {
-            let diff = (page_array.pages_allocated - page_array.pages_loaned) * page_size;
+        let Some(page_array) = self.find(ptr) else {
+            println!("Page array not owned by allocator");
+            return false;
+        };
+
+        if page_array.allocated > page_array.loaned {
+            let diff = (page_array.allocated - page_array.loaned) * page_size;
             if diff >= added_size {
                 page_array.increment_loaned_page_count();
 
                 return true;
             }
 
-            page_array.pages_loaned = page_array.pages_allocated;
+            page_array.loaned = page_array.allocated;
         }
 
-        let old_size = page_array.pages_loaned * page_size;
+        let old_size = page_array.loaned * page_size;
         page_array.increment_loaned_page_count();
-        let new_size = page_array.pages_loaned * page_size;
+        let new_size = page_array.loaned * page_size;
 
         match unsafe { mremap(ptr.cast(), old_size, new_size, MREMAP_FIXED) } {
             MAP_FAILED => {
@@ -251,7 +248,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
             }
             new_ptr => {
                 assert_eq!(new_ptr.cast(), ptr);
-                // page_array.increment_loaned_page_count();
                 page_array.increment_allocated_page_count();
 
                 true
@@ -260,21 +256,22 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     }
 }
 
-impl<'a> Default for ArrayPageAllocator<'a> {
+impl Default for ArrayPageAllocator<'_> {
     fn default() -> Self {
         Self::with_page_size(DEFAULT_PAGE_SIZE)
+            .expect("Failed to allocate default ArrayPageAllocator")
     }
 }
 
-impl<'a> Drop for ArrayPageAllocator<'a> {
+impl Drop for ArrayPageAllocator<'_> {
     fn drop(&mut self) {
-        let page_blocks = &self.page_array_buffer;
-        for i in 0..(self.page_array_count as usize) {
+        let page_blocks = &self.array_buffer;
+        for i in 0..(self.array_count as usize) {
             let page_array = &page_blocks[i];
             unsafe {
                 libc::munmap(
-                    page_array.pages.cast(),
-                    self.page_size * page_array.pages_allocated,
+                    page_array.buffer.cast(),
+                    self.page_size * page_array.allocated,
                 )
             };
         }
@@ -283,18 +280,16 @@ impl<'a> Drop for ArrayPageAllocator<'a> {
         // it was cast to a slice
         unsafe {
             let success = libc::munmap(
-                self.page_array_buffer as *mut [PageArray] as *mut c_void,
+                self.array_buffer.as_mut_ptr().cast(),
                 size_of::<PageArray>() * 12,
             );
-            if success == -1 {
-                panic!("Failed to unmap memory chunk");
-            }
+            assert_ne!(success, -1, "Failed to unmap memory chunk");
         };
     }
 }
 
-impl<'a> ArrayPageAllocator<'a> {
-    fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
+impl ArrayPageAllocator<'_> {
+    const fn to_page_ptr<T: ?Sized>(&self, ptr: *mut T) -> *mut Page {
         slice_from_raw_parts_mut(ptr.cast::<u8>(), self.page_size) as *mut Page
     }
 }
@@ -308,14 +303,14 @@ mod test {
         let mut allocator = ArrayPageAllocator::default();
 
         unsafe {
-            let page = allocator.request_page();
+            let page = allocator.request_page().unwrap();
             assert!(!page.is_null());
             allocator.relinquish_page(page);
 
-            let one = allocator.request_page();
+            let one = allocator.request_page().unwrap();
             assert!(!one.is_null());
 
-            let two = allocator.request_page();
+            let two = allocator.request_page().unwrap();
             assert!(!two.is_null());
 
             allocator.relinquish_page(one);
@@ -325,14 +320,14 @@ mod test {
 
     #[test]
     fn overflow() {
-        let mut allocator = ArrayPageAllocator::with_page_size(DEFAULT_PAGE_SIZE * 12);
+        let mut allocator = ArrayPageAllocator::with_page_size(DEFAULT_PAGE_SIZE * 12).unwrap();
 
         unsafe {
-            let one = allocator.request_page();
+            let one = allocator.request_page().unwrap();
             assert!(!one.is_null());
             allocator.relinquish_page(one);
 
-            let two = allocator.request_page();
+            let two = allocator.request_page().unwrap();
             assert!(!two.is_null());
             allocator.relinquish_page(two);
         }
@@ -343,10 +338,10 @@ mod test {
         let mut allocator = ArrayPageAllocator::default();
 
         unsafe {
-            let one = allocator.request_page_zeroed();
+            let one = allocator.request_page_zeroed().unwrap();
             assert!(!one.is_null());
 
-            let two = allocator.request_page_zeroed();
+            let two = allocator.request_page_zeroed().unwrap();
             assert!(!two.is_null());
 
             let two_sum: u8 = (0..16).into_iter().map(|i| *(two.wrapping_add(i))).sum();

@@ -12,3 +12,8 @@ harness = false
 [dependencies]
 criterion = "0.7.0"
 libc = "0.2"
+
+[lints.clippy] # come at me, clippy
+pedantic      = { level = "deny", priority = -1 }
+nursery       = { level = "deny", priority = -1 }
+unwrap_used   = "deny"

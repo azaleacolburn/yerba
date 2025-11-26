@@ -70,35 +70,34 @@ where
     phantom: PhantomData<&'a H>,
 }
 
-impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
+impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
     /// # Safety
     /// Panics if:
     /// - The first page cannot be allocated
-    pub fn with_allocator(mut page_allocator: A) -> Self {
-        let first_block = H::initialize_header(&mut page_allocator);
+    pub fn with_allocator(mut page_allocator: A) -> Result<Self, AllocError> {
+        let first_block = H::initialize_header(&mut page_allocator)?;
 
         let buf = slice_from_raw_parts_mut(first_block, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
 
-        Self {
+        Ok(Self {
             buf,
             page_allocator: RefCell::new(page_allocator),
             phantom: PhantomData,
-        }
+        })
     }
 
     fn next_header(&self, header_ptr: &H) -> Option<H> {
-        if header_ptr.size() == 0 {
-            panic!("Should not have zero sized headers")
-        }
+        assert!(header_ptr.size() != 0, "Should not have zero sized headers");
+
         if header_ptr.last_addr() >= self.last_addr() {
             return None;
         }
         Some(unsafe { header_ptr.next_unchecked() })
     }
 
-    /// Requests a new page to accommodate a new block started at the old last_addr
+    /// Requests a new page to accommodate a new block started at the old `last_addr`
     /// Places both a new header representing a block of `size` and `alignment_offset`
     /// Then creates a new top header with the remaining size
     /// # Args
@@ -107,20 +106,19 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
     /// - `alignment_offset`: the calculated offset to be added to
     ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
     ///     is of type `*mut T`
-    /// # Safety
-    /// Panics if:
-    /// - a new page contiguous page cannot be allocated
+    /// # Errors
+    /// Returns an `AllocError` if
+    /// - A new page contiguous page cannot be allocated, see `A::request_page` for details
+    /// # Panics
+    /// - If the totah allocated space after allocating the new page isn't equal to `2 * PAGE_SIZE`
     pub fn add_page(&self, size: usize) -> Result<(), AllocError> {
         unsafe {
             let mut header = self.last_block();
             let initial_header_size = header.size();
-            let old_last_addr = self.last_addr();
 
-            let new_page = self.page_allocator.borrow_mut().request_page();
             // Fails if the new page is null or not contiguous with the old one
-            if new_page.is_null() {
-                return Err(AllocError);
-            }
+            let new_page = self.page_allocator.borrow_mut().request_page()?;
+            assert!(!new_page.is_null());
 
             header.set_size(initial_header_size + PAGE_SIZE);
             header.try_split_allocated_block(size, self.last_addr());
@@ -169,7 +167,7 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
             if header_ptr.used() {
                 last_header_ptr.replace(*header_ptr);
                 // If the block is used, there must be another block
-                let next_block = &self.next_header(&header_ptr).unwrap();
+                let next_block = &self.next_header(&header_ptr).ok_or(AllocError)?;
                 curr_header_ptr.replace(*next_block);
 
                 continue;
@@ -207,7 +205,7 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
 
             last_header_ptr = Some(*header_ptr);
             let next_header = &self.next_header(&header_ptr);
-            if let None = next_header {
+            if matches!(next_header, None) {
                 let pre = self.last_addr();
                 self.add_page(size)?;
                 let post = self.last_addr();
@@ -223,7 +221,7 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
 
     #[inline]
     fn first_block(&self) -> H {
-        H::new(self.buf_ptr())
+        unsafe { H::new(self.buf_ptr()) }
     }
 
     #[inline]
@@ -263,13 +261,13 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
     }
 }
 
-impl<'a, A, H> WithPageSize for ListAllocator<'a, A, H>
+impl<A, H> WithPageSize for ListAllocator<'_, A, H>
 where
     A: PageAllocator + WithPageSize,
     H: InlineHeader,
 {
     /// Creates a new contiguous list allocator
-    /// Manually allocates its own page_allocator with a given page size (not recommended)
+    /// Manually allocates its own `page_allocator` with a given page size (not recommended)
     ///
     /// # Safety
     /// Panics if:
@@ -280,19 +278,19 @@ where
     /// use yerba::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator, with_page_size::WithPageSize};
     /// let allocator = ListAllocator::<ArrayPageAllocator>::with_page_size(4096);
     /// ```
-    fn with_page_size(page_size: usize) -> Self {
-        let allocator = A::with_page_size(page_size);
+    fn with_page_size(page_size: usize) -> Result<Self, AllocError> {
+        let allocator = A::with_page_size(page_size)?;
         Self::with_allocator(allocator)
     }
 }
 
-impl<'a, A, H> Default for ListAllocator<'a, A, H>
+impl<A, H> Default for ListAllocator<'_, A, H>
 where
     A: PageAllocator + WithPageSize,
     H: InlineHeader,
 {
     /// Creates a new contiguous list allocator
-    /// Manually allocates its own page_allocator using the default page size (not recommended )
+    /// Manually allocates its own `page_allocator` using the default page size (not recommended )
     ///
     /// # Safety
     /// Panics if:
@@ -305,11 +303,11 @@ where
     /// ```
 
     fn default() -> Self {
-        Self::with_page_size(PAGE_SIZE)
+        Self::with_page_size(PAGE_SIZE).expect("Failed to allocate the default ListAllocator")
     }
 }
 
-unsafe impl<'a, A, H> Allocator for ListAllocator<'a, A, H>
+unsafe impl<A, H> Allocator for ListAllocator<'_, A, H>
 where
     A: PageAllocator,
     H: InlineHeader,
@@ -425,7 +423,7 @@ where
         unsafe {
             self.add_page(new_size)?;
 
-            let header_ptr = frontier_ptr.unwrap();
+            let header_ptr = frontier_ptr.ok_or(AllocError)?;
 
             // Ideally they don't request more than a page
             while new_size > header_ptr.size() {
@@ -540,7 +538,7 @@ mod test {
     fn multiple_allocators() {
         let mut page_allocator = ArrayPageAllocator::default();
         let allocator =
-            ListAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator);
+            ListAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator).unwrap();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 

@@ -1,5 +1,10 @@
-pub trait WithPageSize {
-    fn with_page_size(page_size: usize) -> Self;
+use core::alloc::AllocError;
+
+pub trait WithPageSize
+where
+    Self: Sized,
+{
+    fn with_page_size(page_size: usize) -> Result<Self, AllocError>;
 }
 
 pub trait WithSize {

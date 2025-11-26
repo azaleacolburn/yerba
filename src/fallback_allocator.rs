@@ -6,7 +6,7 @@ use core::ptr::NonNull;
 /// other on a failure.
 ///
 /// # Safety
-/// - `A` functions must not panic on failure, instead returning a null_ptr or early returning
+/// - `A` functions must not panic on failure, instead must return an `AllocError` or early return
 struct FallbackAllocator<A, F>
 where
     A: Allocator,

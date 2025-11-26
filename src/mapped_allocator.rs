@@ -16,7 +16,7 @@ pub struct MappedHeader {
 }
 
 impl MappedHeader {
-    fn last_addr(&self) -> NonNull<u8> {
+    const fn last_addr(&self) -> NonNull<u8> {
         unsafe { self.data.add(self.size + self.offset) }
     }
 }
@@ -72,20 +72,21 @@ where
     marker: PhantomData<&'a A>,
 }
 
-impl<'a, A> MappedAllocator<'a, A>
+impl<A> MappedAllocator<'_, A>
 where
     A: PageAllocator,
 {
-    fn headers(&self) -> NonNull<MappedHeader> {
+    const fn headers(&self) -> NonNull<MappedHeader> {
         self.headers.get()
     }
 
-    fn with_allocator(mut page_allocator: A) -> MappedAllocator<'a, A> {
+    fn with_allocator(mut page_allocator: A) -> Result<Self, AllocError> {
         let page_size = page_allocator.get_page_size();
 
         // The pages being allocated are overlapping here
-        let blocks_buffer = unsafe { page_allocator.request_page_zeroed().cast::<u8>() };
-        let headers_buffer = unsafe { page_allocator.request_page_zeroed().cast::<MappedHeader>() };
+        let blocks_buffer = unsafe { page_allocator.request_page_zeroed()?.cast::<u8>() };
+        let headers_buffer =
+            unsafe { page_allocator.request_page_zeroed()?.cast::<MappedHeader>() };
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
 
         let initial_header = MappedHeader {
@@ -97,13 +98,13 @@ where
         unsafe {
             headers_buffer.write(initial_header);
 
-            Self {
+            Ok(Self {
                 headers: Cell::new(NonNull::new_unchecked(headers_buffer)),
                 header_buffer_size: page_size,
                 headers_allocated: Cell::new(1),
                 page_allocator: RefCell::new(page_allocator),
                 marker: PhantomData,
-            }
+            })
         }
     }
 
@@ -137,7 +138,11 @@ where
         }
     }
 
-    fn add_header(&self, data: NonNull<u8>, size: usize) -> NonNull<MappedHeader> {
+    fn add_header(
+        &self,
+        data: NonNull<u8>,
+        size: usize,
+    ) -> Result<NonNull<MappedHeader>, AllocError> {
         let header = MappedHeader {
             size,
             data,
@@ -151,7 +156,7 @@ where
                 header_ptr.write(header);
                 self.headers_allocated.update(|n| n + 1);
 
-                return header_ptr;
+                return Ok(header_ptr);
             }
         }
 
@@ -169,7 +174,7 @@ where
                 let page = self
                     .page_allocator
                     .borrow_mut()
-                    .request_page()
+                    .request_page()?
                     .cast::<MappedHeader>();
                 assert!(page.is_null());
 
@@ -187,7 +192,7 @@ where
             header_ptr.write(header);
             self.headers_allocated.update(|n| n + 1);
 
-            header_ptr
+            Ok(header_ptr)
         }
     }
 
@@ -230,30 +235,29 @@ where
                     .extend_page(header.data.as_ptr(), needed_space - header.size)
         };
 
-        match self.find_block(extendable) {
-            Some(mut header_ptr) => {
-                unsafe {
-                    header_ptr.as_mut().size += needed_space;
-                }
-                Ok(header_ptr)
-            }
-            None => unsafe {
+        let Some(mut header_ptr) = self.find_block(extendable) else {
+            unsafe {
                 let mut allocator = self.page_allocator.borrow_mut();
                 let page_size = allocator.get_page_size();
 
-                let page = allocator.request_page();
+                let page = allocator.request_page()?;
                 assert!(!page.is_null());
                 let page = NonNull::new_unchecked(page);
 
-                Ok(self.add_header(page, page_size))
-            },
+                return self.add_header(page, page_size);
+            }
+        };
+
+        unsafe {
+            header_ptr.as_mut().size += needed_space;
         }
+        Ok(header_ptr)
     }
 }
 
 // Where exactly the headers point to in memory isn't really something we care about, so merging
 // blocks is especially difficult (but splitting them isn't any harder)
-unsafe impl<'a, A> Allocator for MappedAllocator<'a, A>
+unsafe impl<A> Allocator for MappedAllocator<'_, A>
 where
     A: PageAllocator,
 {
@@ -290,12 +294,8 @@ where
     }
 
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
-        let mut header_ptr = match self.find_specific_block(ptr) {
-            Some(ptr) => ptr,
-            None => {
-                panic!("Data pointer not found");
-                // TODO Once this bug is fixed, early return instead
-            }
+        let Some(mut header_ptr) = self.find_specific_block(ptr) else {
+            return;
         };
         unsafe {
             header_ptr.as_mut().used = false;
@@ -305,11 +305,8 @@ where
         unsafe {
             let header = header_ptr.read();
 
-            if layout.size() != header.size {
-                panic!("Layout of wrong size");
-                // TODO Figure out what to do in this case
-                // return;
-            }
+            // TODO Figure out what to do in this case
+            assert!(layout.size() == header.size, "Layout of wrong size");
             let get_next_block = |header: &MappedHeader| header.data.add(header.size);
 
             let is_adjacent_after = |searching_header: &MappedHeader| {
@@ -344,10 +341,11 @@ where
     }
 }
 
-impl<'a> Default for MappedAllocator<'a> {
+impl Default for MappedAllocator<'_> {
     fn default() -> Self {
-        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE);
-        Self::with_allocator(page_allocator)
+        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE)
+            .expect("Failed to allocate MappedAllocator");
+        Self::with_allocator(page_allocator).expect("Failed to allocate MappedAllocator")
     }
 }
 
@@ -364,8 +362,8 @@ mod test {
 
     #[test]
     fn alloc_chunks() {
-        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE);
-        let allocator = MappedAllocator::with_allocator(page_allocator);
+        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE).unwrap();
+        let allocator = MappedAllocator::with_allocator(page_allocator).unwrap();
         let layout = Layout::new::<[u8; 300]>();
 
         let one: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
@@ -446,7 +444,8 @@ mod test {
     fn multiple_allocators() {
         let mut page_allocator = ArrayPageAllocator::default();
         let allocator =
-            MappedAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator);
+            MappedAllocator::<&mut ArrayPageAllocator>::with_allocator(&mut page_allocator)
+                .unwrap();
         let layout = Layout::new::<[u8; 2000]>();
         let second_layout = Layout::new::<[u8; 3080]>();
 
