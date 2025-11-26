@@ -187,6 +187,7 @@ where
             // item in the headers buffer
             let header_ptr = self.headers().add(self.headers_allocated.get());
             header_ptr.write(header);
+            self.headers_allocated.update(|n| n + 1);
 
             header_ptr
         }
@@ -225,7 +226,7 @@ where
     // If none are extendable, then we allocate a completely new block
     /// Returns a safe place for a block of size `needed_space` to be in
     /// or an `AllocError`
-    fn alloc_more_space(&self, needed_space: usize) -> Result<AllocSpaceResult, AllocError> {
+    fn alloc_more_space(&self, needed_space: usize) -> Result<NonNull<MappedHeader>, AllocError> {
         let extendable = |header: &MappedHeader| unsafe {
             !header.used
                 && self
@@ -239,20 +240,20 @@ where
                 unsafe {
                     header_ptr.as_mut().size += needed_space;
                 }
-                Ok(AllocSpaceResult::ExpandedBlock(header_ptr))
+                Ok(header_ptr)
             }
-            None => {
-                // self.add_header(data, size)
+            None => unsafe {
+                let mut allocator = self.page_allocator.borrow_mut();
+                let page_size = allocator.get_page_size();
 
-                Err(AllocError)
-            }
+                let page = allocator.request_page();
+                assert!(!page.is_null());
+                let page = NonNull::new_unchecked(page);
+
+                Ok(self.add_header(page, page_size))
+            },
         }
     }
-}
-
-enum AllocSpaceResult {
-    NewBlock(NonNull<u8>),
-    ExpandedBlock(NonNull<MappedHeader>),
 }
 
 // Where exactly the headers point to in memory isn't really something we care about, so merging
@@ -274,10 +275,7 @@ where
                 // TODO Figure out how much space we need exactly (maybe there's some offset that
                 // makes this not work
                 println!("GETTING MORE SPACE");
-                match self.alloc_more_space(size)? {
-                    AllocSpaceResult::NewBlock(data_ptr) => self.add_header(data_ptr, size),
-                    AllocSpaceResult::ExpandedBlock(header_ptr) => header_ptr,
-                }
+                self.alloc_more_space(size)?
             }
         };
         println!(
