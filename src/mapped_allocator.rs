@@ -110,7 +110,7 @@ where
 
     /// Finds an empty block of `size`
     fn find_empty_block(&self, size: usize) -> Option<NonNull<MappedHeader>> {
-        let open_and_fits = |header: MappedHeader| !header.used && header.size >= size;
+        let open_and_fits = |header: &MappedHeader| !header.used && header.size >= size;
         self.find_block(open_and_fits)
     }
 
@@ -192,15 +192,16 @@ where
 
     fn find_block(
         &self,
-        predicate: impl Fn(MappedHeader) -> bool,
+        predicate: impl Fn(&MappedHeader) -> bool,
     ) -> Option<NonNull<MappedHeader>> {
-        let mut header_ptr = self.headers();
-
         unsafe {
-            let last_addr = self.headers().byte_add(self.header_buffer_size);
+            let mut header_ptr = self.headers();
             let mut header = header_ptr.read();
 
-            while !predicate(header) {
+            let last_addr = header_ptr.byte_add(self.header_buffer_size);
+
+            while !predicate(&header) {
+                println!("header search: {:?}", header);
                 header_ptr = header_ptr.add(1);
 
                 if header_ptr > last_addr {
@@ -210,12 +211,13 @@ where
                 header = header_ptr.read();
             }
 
+            println!("t");
             Some(header_ptr)
         }
     }
 
     fn find_specific_block(&self, ptr: NonNull<u8>) -> Option<NonNull<MappedHeader>> {
-        self.find_block(|header: MappedHeader| header.data == ptr)
+        self.find_block(|header: &MappedHeader| header.data == ptr)
     }
 
     // TODO
@@ -328,10 +330,10 @@ where
             let header = header_ptr.read();
             let get_next = |header: &MappedHeader| header.data.add(header.size);
 
-            let is_adjacent_after = |searching_header: MappedHeader| {
+            let is_adjacent_after = |searching_header: &MappedHeader| {
                 !searching_header.used && get_next(&header) == searching_header.data
             };
-            let is_adjacent_before = |searching_header: MappedHeader| {
+            let is_adjacent_before = |searching_header: &MappedHeader| {
                 !searching_header.used && get_next(&searching_header) == header.data
             };
 
@@ -431,12 +433,12 @@ mod test {
         let new_layout = Layout::new::<[u8; 32]>();
 
         unsafe {
-            let one = allocator.allocate(layout).unwrap().cast();
-            let two = allocator.allocate(layout).unwrap().cast();
+            let mut one = allocator.allocate(layout).unwrap().cast();
+            // let two = allocator.allocate(layout).unwrap().cast();
 
-            allocator.grow(two, layout, new_layout);
-            allocator.deallocate(one, layout);
-            allocator.deallocate(two, new_layout);
+            one = allocator.grow(one, layout, new_layout).unwrap().cast();
+            allocator.deallocate(one, new_layout);
+            // allocator.deallocate(two, new_layout);
         }
     }
 
