@@ -5,8 +5,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr::slice_from_raw_parts_mut;
 use core::ptr::{self};
 use libc::{
-    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, MAP_SHARED,
-    MREMAP_FIXED, PROT_READ, PROT_WRITE, mremap,
+    self, MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_SHARED, MREMAP_FIXED, PROT_READ,
+    PROT_WRITE, mremap,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 4096;
@@ -146,10 +146,6 @@ impl<'a> ArrayPageAllocator<'a> {
 
             let buf_ptr: *mut T = page_array.pages.cast();
             let end = unsafe { buf_ptr.byte_add(page_array.pages_loaned * self.page_size) };
-            // println!(
-            //     "start {:?} end {:?} ptr {:?} loaned {:?}",
-            //     buf_ptr, end, ptr, page_array.pages_loaned
-            // );
 
             if (buf_ptr..end).contains(&ptr) {
                 return Some(&mut self.page_array_buffer[i]);
@@ -207,10 +203,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
             let lower = page_array.pages.addr();
             let upper = lower + page_count * self.page_size;
             if ptr.addr() > lower && ptr.addr() < upper {
-                // This is an atomic number so we can edit it through
-                // our stack version of page_array in stack memory
-                // even though we couldn't edit values of page_array on the heap
-                // using it
                 page_array.decrement_allocated_page_count();
                 unsafe {
                     ptr.write_bytes(0, self.page_size);
@@ -222,17 +214,11 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     fn get_pages_allocated(&self) -> usize {
         let page_array_count = self.page_array_count as usize;
 
-        // This is outside the general style of this project
-        // (0..page_array_count)
-        //     .into_iter()
-        //     .map(|i| self.page_array_buffer[i].pages_loaned)
-        //     .sum()
-        let mut sum = 0;
-        for i in 0..page_array_count {
-            let page_array = &self.page_array_buffer[i];
-            sum += page_array.pages_loaned;
-        }
-        sum
+        // TODO Make code style choices
+        (0..page_array_count)
+            .into_iter()
+            .map(|i| self.page_array_buffer[i].pages_loaned)
+            .sum()
     }
 
     fn get_page_size(&self) -> usize {
@@ -240,7 +226,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
     }
 
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool {
-        println!("extending page");
         let page_size = self.page_size;
         let page_array = self.find(ptr).unwrap();
         if page_array.pages_allocated > page_array.pages_loaned {
@@ -253,8 +238,6 @@ impl<'a> PageAllocator for ArrayPageAllocator<'a> {
 
             page_array.pages_loaned = page_array.pages_allocated;
         }
-
-        let last_addr = unsafe { ptr.byte_add(page_size) };
 
         let old_size = page_array.pages_loaned * page_size;
         page_array.increment_loaned_page_count();
@@ -288,7 +271,6 @@ impl<'a> Drop for ArrayPageAllocator<'a> {
         let page_blocks = &self.page_array_buffer;
         for i in 0..(self.page_array_count as usize) {
             let page_array = &page_blocks[i];
-            println!("here: {:?}", page_array);
             unsafe {
                 libc::munmap(
                     page_array.pages.cast(),
@@ -296,9 +278,9 @@ impl<'a> Drop for ArrayPageAllocator<'a> {
                 )
             };
         }
-        // I don't think this memory needs to be unmapped?
-        // It might though
-        // TODO Figure this out
+
+        // I this memory needs to be unmapped, even though
+        // it was cast to a slice
         unsafe {
             let success = libc::munmap(
                 self.page_array_buffer as *mut [PageArray] as *mut c_void,

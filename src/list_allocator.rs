@@ -119,8 +119,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
             let new_page = self.page_allocator.borrow_mut().request_page();
             // Fails if the new page is null or not contiguous with the old one
             if new_page.is_null() {
-                // || old_last_addr != new_page.addr() {
-                println!("here1");
                 return Err(AllocError);
             }
 
@@ -211,7 +209,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
             let next_header = &self.next_header(&header_ptr);
             if let None = next_header {
                 let pre = self.last_addr();
-                println!("here");
                 self.add_page(size)?;
                 let post = self.last_addr();
                 assert_eq!(post - pre, PAGE_SIZE);
@@ -232,7 +229,6 @@ impl<'a, A: PageAllocator, H: InlineHeader> ListAllocator<'a, A, H> {
     #[inline]
     fn last_addr(&self) -> usize {
         let pages = self.page_allocator.borrow().get_pages_allocated();
-        println!("pages {}", pages);
         self.buf_ptr().wrapping_add(PAGE_SIZE * pages).addr()
     }
 

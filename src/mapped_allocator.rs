@@ -86,7 +86,6 @@ where
         // The pages being allocated are overlapping here
         let blocks_buffer = unsafe { page_allocator.request_page_zeroed().cast::<u8>() };
         let headers_buffer = unsafe { page_allocator.request_page_zeroed().cast::<MappedHeader>() };
-        println!("blocks {:?} headers {:?}", blocks_buffer, headers_buffer);
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
 
         let initial_header = MappedHeader {
@@ -124,7 +123,6 @@ where
         }
 
         let new_data_ptr = unsafe { header.data.byte_add(new_size) };
-        println!("split block size {:?}", next_size);
         self.add_header(new_data_ptr, next_size);
 
         unsafe {
@@ -204,11 +202,8 @@ where
             unsafe {
                 let header_ptr = base_ptr.add(i);
                 header = header_ptr.read();
-                println!("header search: {:?}", header);
-                println!("header ptr: {:?}", header_ptr);
 
                 if predicate(&header) {
-                    println!("Found header");
                     return Some(header_ptr);
                 }
             }
@@ -274,20 +269,13 @@ where
             None => {
                 // TODO Figure out how much space we need exactly (maybe there's some offset that
                 // makes this not work
-                println!("GETTING MORE SPACE");
                 self.alloc_more_space(size)?
             }
         };
-        println!(
-            "first header ptr: {:?}\nreal header  ptr: {:?}",
-            self.headers(),
-            header_ptr
-        );
 
         self.try_split_block(header_ptr, size);
         let header = unsafe { header_ptr.read() };
 
-        println!("{:?}", header);
         let alignment_offset = header.data.align_offset(align);
         let offset_data = unsafe { header.data.add(alignment_offset) };
         unsafe {
@@ -297,14 +285,11 @@ where
         };
 
         let data_ptr = NonNull::slice_from_raw_parts(offset_data, size);
-        println!("ptr from alloc: {:?}", data_ptr);
 
         Ok(data_ptr)
     }
 
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
-        println!("ptr for dealloc: {:?}", ptr);
-        println!("first header: {:?}", unsafe { self.headers().read() });
         let mut header_ptr = match self.find_specific_block(ptr) {
             Some(ptr) => ptr,
             None => {
@@ -321,7 +306,7 @@ where
             let header = header_ptr.read();
 
             if layout.size() != header.size {
-                println!("Layout of wrong size");
+                panic!("Layout of wrong size");
                 // TODO Figure out what to do in this case
                 // return;
             }
@@ -433,10 +418,9 @@ mod test {
             let mut one = allocator.allocate(layout).unwrap().cast();
             let two: NonNull<u8> = allocator.allocate(layout).unwrap().cast();
 
-            println!("one: {:?} two {:?}\n", one, two);
             one = allocator.grow(one, layout, new_layout).unwrap().cast();
             allocator.deallocate(one, new_layout);
-            // allocator.deallocate(two, new_layout);
+            allocator.deallocate(two, layout);
         }
     }
 
