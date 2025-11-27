@@ -117,7 +117,7 @@ impl ArrayPageAllocator<'_> {
 }
 
 impl PageAllocator for ArrayPageAllocator<'_> {
-    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
+    unsafe fn request_page(&mut self) -> Result<*mut [u8], AllocError> {
         let page_array_count = self.array_count as usize;
         assert!(page_array_count < 12);
         // TODO Write code to resize header buffer
@@ -136,7 +136,10 @@ impl PageAllocator for ArrayPageAllocator<'_> {
         self.array_buffer[page_array_count] = new_page_array;
         self.array_count += 1;
 
-        Ok(new_base_page.cast())
+        Ok(slice_from_raw_parts_mut(
+            new_base_page.cast(),
+            self.page_size,
+        ))
     }
 
     unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
@@ -225,7 +228,8 @@ impl PageAllocator for ArrayPageAllocator<'_> {
 impl Default for ArrayPageAllocator<'_> {
     fn default() -> Self {
         unsafe {
-            let page_size = sysconf(_SC_PAGESIZE) as usize;
+            let page_size = usize::try_from(sysconf(_SC_PAGESIZE))
+                .expect("Yerba does not support 32-bit hardware");
             // Create the underlying block for storing pointers to arrays of blocks and the sizes
             // of those arrays
             // This will be of type `*mut [PageArray]`
@@ -313,7 +317,7 @@ mod test {
 
     #[test]
     fn overflow() {
-        let mut allocator = ArrayPageAllocator::with_page_size(DEFAULT_PAGE_SIZE * 12).unwrap();
+        let mut allocator = ArrayPageAllocator::default();
 
         unsafe {
             let one = allocator.request_page().unwrap();

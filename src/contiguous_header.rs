@@ -13,12 +13,6 @@ pub struct UnderlyingContiguousHeader {
     offset: usize,
 }
 
-impl Default for UnderlyingContiguousHeader {
-    fn default() -> Self {
-        Self::with_size(PAGE_SIZE - size_of::<Self>())
-    }
-}
-
 impl UnderlyingContiguousHeader {
     #[must_use]
     pub const fn with_size(size: usize) -> Self {
@@ -175,13 +169,16 @@ impl InlineHeader for ContiguousHeader {
     fn initialize_header(
         mut page_allocator: impl crate::page_allocator::PageAllocator,
     ) -> Result<*mut Self::Header, AllocError> {
-        const {
-            let header_size = size_of::<UnderlyingContiguousHeader>();
-            assert!(header_size < PAGE_SIZE);
-            assert!(header_size.is_multiple_of(8));
-        }
+        let header_size = size_of::<UnderlyingContiguousHeader>();
+        assert!(header_size < page_allocator.get_page_size());
+        assert!(header_size.is_multiple_of(8));
 
         let page_ptr = unsafe {
+            // NOTE
+            // This is fine because the returned page
+            // is guaranteed to be aligned to the system's
+            // page size which is greater than 8-bytes.
+            #[allow(clippy::cast_ptr_alignment)]
             page_allocator
                 .request_page_zeroed()?
                 .cast::<UnderlyingContiguousHeader>()

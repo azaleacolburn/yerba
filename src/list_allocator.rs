@@ -76,7 +76,8 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
     pub fn with_allocator(mut page_allocator: A) -> Result<Self, AllocError> {
         let first_block = H::initialize_header(&mut page_allocator)?;
 
-        let buf = slice_from_raw_parts_mut(first_block, PAGE_SIZE) as *mut UnsafeCell<[u8]>;
+        let buf = slice_from_raw_parts_mut(first_block, page_allocator.get_page_size())
+            as *mut UnsafeCell<[u8]>;
 
         Ok(Self {
             buf,
@@ -116,12 +117,12 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
             // Fails if the new page is null or not contiguous with the old one
             let new_page = self.page_allocator.borrow_mut().request_page()?;
             assert!(!new_page.is_null());
-
-            header.set_size(initial_header_size + PAGE_SIZE);
+            let page_size = self.page_allocator.borrow().get_page_size();
+            header.set_size(initial_header_size + page_size);
             header.try_split_allocated_block(size, self.last_addr());
 
             let allocated_space = self.last_addr() - self.buf_ptr().addr();
-            assert_eq!(2 * PAGE_SIZE, allocated_space);
+            assert_eq!(2 * page_size, allocated_space);
 
             // NOTE This should be covered by spliting the expanded top block
             // let remaining_size = self.last_addr()
@@ -206,7 +207,7 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
                 let pre = self.last_addr();
                 self.add_page(size)?;
                 let post = self.last_addr();
-                assert_eq!(post - pre, PAGE_SIZE);
+                assert_eq!(post - pre, self.page_allocator.borrow().get_page_size());
 
                 break;
             }
@@ -223,8 +224,11 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
 
     #[inline]
     fn last_addr(&self) -> usize {
-        let pages = self.page_allocator.borrow().get_pages_allocated();
-        self.buf_ptr().wrapping_add(PAGE_SIZE * pages).addr()
+        let allocator = self.page_allocator.borrow();
+        let pages = allocator.get_pages_allocated();
+        self.buf_ptr()
+            .wrapping_add(allocator.get_page_size() * pages)
+            .addr()
     }
 
     #[inline]

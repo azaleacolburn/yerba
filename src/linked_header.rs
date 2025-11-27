@@ -1,11 +1,6 @@
-use core::{
-    alloc::{AllocError, Layout},
-    num::NonZeroUsize,
-    ops::Deref,
-    ptr::NonNull,
-};
+use core::{alloc::AllocError, num::NonZeroUsize, ops::Deref, ptr::NonNull};
 
-use crate::{inline_header::InlineHeader, util::MAX_ALIGN};
+use crate::inline_header::InlineHeader;
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
@@ -179,10 +174,6 @@ impl InlineHeader for LinkedHeader {
 
             Ok(page)
         }
-    }
-
-    fn is_valid_layout(layout: &Layout) -> bool {
-        layout.size() <= PAGE_SIZE * 12 && layout.align() <= MAX_ALIGN
     }
 }
 
