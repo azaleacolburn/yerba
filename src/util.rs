@@ -1,8 +1,7 @@
 use core::{alloc::AllocError, ptr::NonNull};
 
-pub const PAGE_SIZE: usize = 4096;
 pub const MIN_BLOCK_SIZE: usize = 8;
-pub const MAX_BLOCK_SIZE: usize = PAGE_SIZE * 12;
+pub const MAX_BLOCK_SIZE: usize = 4096 * 12; // 24 KB
 pub const MAX_ALIGN: usize = 32;
 pub const MIN_ALIGN: usize = 1;
 

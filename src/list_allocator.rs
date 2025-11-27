@@ -2,8 +2,6 @@ use crate::array_page_allocator::ArrayPageAllocator;
 use crate::contiguous_header::ContiguousHeader;
 use crate::inline_header::InlineHeader;
 use crate::page_allocator::PageAllocator;
-use crate::util::PAGE_SIZE;
-use crate::with_page_size::WithPageSize;
 use core::alloc::{AllocError, Allocator, Layout};
 use core::cell::RefCell;
 use core::marker::PhantomData;
@@ -73,9 +71,8 @@ where
 impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
-    /// # Safety
-    /// Panics if:
-    /// - The first page cannot be allocated
+    /// # Errors
+    /// - If the first page cannot be allocated
     pub fn with_allocator(mut page_allocator: A) -> Result<Self, AllocError> {
         let first_block = H::initialize_header(&mut page_allocator)?;
 
@@ -261,32 +258,9 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
     }
 }
 
-impl<A, H> WithPageSize for ListAllocator<'_, A, H>
-where
-    A: PageAllocator + WithPageSize,
-    H: InlineHeader,
-{
-    /// Creates a new contiguous list allocator
-    /// Manually allocates its own `page_allocator` with a given page size (not recommended)
-    ///
-    /// # Safety
-    /// Panics if:
-    /// - The first page cannot be allocated
-    ///
-    /// # Usage
-    /// ```rust
-    /// use yerba::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator, with_page_size::WithPageSize};
-    /// let allocator = ListAllocator::<ArrayPageAllocator>::with_page_size(4096);
-    /// ```
-    fn with_page_size(page_size: usize) -> Result<Self, AllocError> {
-        let allocator = A::with_page_size(page_size)?;
-        Self::with_allocator(allocator)
-    }
-}
-
 impl<A, H> Default for ListAllocator<'_, A, H>
 where
-    A: PageAllocator + WithPageSize,
+    A: PageAllocator + Default,
     H: InlineHeader,
 {
     /// Creates a new contiguous list allocator
@@ -303,7 +277,8 @@ where
     /// ```
 
     fn default() -> Self {
-        Self::with_page_size(PAGE_SIZE).expect("Failed to allocate the default ListAllocator")
+        let allocator = A::default();
+        Self::with_allocator(allocator).expect("Failed to allocate allocator")
     }
 }
 

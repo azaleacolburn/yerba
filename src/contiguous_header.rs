@@ -1,4 +1,4 @@
-use crate::{inline_header::InlineHeader, util::PAGE_SIZE};
+use crate::inline_header::InlineHeader;
 use core::ops::Deref;
 use core::ptr::NonNull;
 use std::alloc::AllocError;

@@ -5,10 +5,7 @@ use core::{
     ptr::NonNull,
 };
 
-use crate::{
-    inline_header::InlineHeader,
-    util::{MAX_ALIGN, PAGE_SIZE},
-};
+use crate::{inline_header::InlineHeader, util::MAX_ALIGN};
 
 /// Represents a memory block
 /// The most significant bit of the offset is used to mark whether the block is used
@@ -19,12 +16,6 @@ pub struct UnderlyingLinkedHeader {
     size: usize,
     next: Option<LinkedHeader>,
     offset: usize,
-}
-
-impl Default for UnderlyingLinkedHeader {
-    fn default() -> Self {
-        Self::with_size(PAGE_SIZE - size_of::<Self>())
-    }
 }
 
 impl UnderlyingLinkedHeader {

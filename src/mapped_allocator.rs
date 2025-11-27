@@ -1,7 +1,5 @@
 use crate::array_page_allocator::ArrayPageAllocator;
 use crate::page_allocator::PageAllocator;
-use crate::util::PAGE_SIZE;
-use crate::with_page_size::WithPageSize;
 use core::alloc::{AllocError, Allocator};
 use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
@@ -343,8 +341,7 @@ where
 
 impl Default for MappedAllocator<'_> {
     fn default() -> Self {
-        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE)
-            .expect("Failed to allocate MappedAllocator");
+        let page_allocator = ArrayPageAllocator::default();
         Self::with_allocator(page_allocator).expect("Failed to allocate MappedAllocator")
     }
 }
@@ -355,14 +352,11 @@ mod test {
     use core::hint::black_box;
     use core::{alloc::Allocator, ptr::NonNull};
 
-    use crate::{
-        array_page_allocator::ArrayPageAllocator, mapped_allocator::MappedAllocator,
-        util::PAGE_SIZE, with_page_size::WithPageSize,
-    };
+    use crate::{array_page_allocator::ArrayPageAllocator, mapped_allocator::MappedAllocator};
 
     #[test]
     fn alloc_chunks() {
-        let page_allocator = ArrayPageAllocator::with_page_size(PAGE_SIZE).unwrap();
+        let page_allocator = ArrayPageAllocator::default();
         let allocator = MappedAllocator::with_allocator(page_allocator).unwrap();
         let layout = Layout::new::<[u8; 300]>();
 

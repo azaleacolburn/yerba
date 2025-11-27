@@ -84,7 +84,10 @@ where
     /// then writes a base header to it the buffer
     /// The header will represent the entire allocated buffer
     /// and so will be of size `page_allocator.get_page_size()`
-    /// Returns a pointer to that buffer
+    /// # Returns
+    /// A pointer to the buffer containing the new header
+    /// # Errors
+    /// - If a buffer can't be allocated to store the header
     fn initialize_header(
         page_allocator: impl PageAllocator,
     ) -> Result<*mut Self::Header, AllocError>;
