@@ -1,5 +1,5 @@
 #![feature(allocator_api)]
-
+#![allow(clippy::all)]
 use criterion::{criterion_group, criterion_main};
 
 pub mod builtin;

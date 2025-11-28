@@ -83,6 +83,11 @@ where
 
         // The pages being allocated are overlapping here
         let blocks_buffer = unsafe { page_allocator.request_page_zeroed()?.cast::<u8>() };
+
+        // NOTE
+        // This cast is fine because the given pointer is guaranteed
+        // to be aligned to the system's page size
+        #[allow(clippy::cast_ptr_alignment)]
         let headers_buffer =
             unsafe { page_allocator.request_page_zeroed()?.cast::<MappedHeader>() };
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
@@ -169,6 +174,10 @@ where
             );
 
             if !extended {
+                // NOTE
+                // This cast is fine because the given pointer is guaranteed
+                // to be aligned to the system's page size
+                #[allow(clippy::cast_ptr_alignment)]
                 let page = self
                     .page_allocator
                     .borrow_mut()
@@ -234,21 +243,21 @@ where
         };
 
         let Some(mut header_ptr) = self.find_block(extendable) else {
-            unsafe {
-                let mut allocator = self.page_allocator.borrow_mut();
-                let page_size = allocator.get_page_size();
+            let mut allocator = self.page_allocator.borrow_mut();
+            let page_size = allocator.get_page_size();
 
+            let page = unsafe {
                 let page = allocator.request_page()?;
-                assert!(!page.is_null());
-                let page = NonNull::new_unchecked(page);
+                NonNull::new(page).ok_or(AllocError)?
+            };
 
-                return self.add_header(page, page_size);
-            }
+            return self.add_header(page, page_size);
         };
 
         unsafe {
             header_ptr.as_mut().size += needed_space;
         }
+
         Ok(header_ptr)
     }
 }
@@ -280,15 +289,12 @@ where
 
         let alignment_offset = header.data.align_offset(align);
         let offset_data = unsafe { header.data.add(alignment_offset) };
-        unsafe {
-            let ptr = header_ptr.as_mut();
-            ptr.data = offset_data;
-            ptr.used = true;
-        };
 
-        let data_ptr = NonNull::slice_from_raw_parts(offset_data, size);
+        let ptr = unsafe { header_ptr.as_mut() };
+        ptr.data = offset_data;
+        ptr.used = true;
 
-        Ok(data_ptr)
+        Ok(NonNull::slice_from_raw_parts(offset_data, size))
     }
 
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {

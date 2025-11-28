@@ -1,7 +1,11 @@
 use core::alloc::AllocError;
 
 pub trait PageAllocator {
+    /// # Errors
+    /// If the page cannot be allocated, likely if a call to `libc::mmap` failed
     unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError>;
+    /// # Errors
+    /// If the page cannot be allocated, likely if a call to `libc::mmap` failed
     unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError>;
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
     /// Attempts to extend a given allocated block by `added_size`, returns true if it was able to

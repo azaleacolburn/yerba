@@ -279,7 +279,6 @@ where
     /// use yerba::{array_page_allocator::ArrayPageAllocator, list_allocator::ListAllocator};
     /// let allocator = ListAllocator::<ArrayPageAllocator>::default();
     /// ```
-
     fn default() -> Self {
         let allocator = A::default();
         Self::with_allocator(allocator).expect("Failed to allocate allocator")

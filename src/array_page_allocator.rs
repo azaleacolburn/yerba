@@ -9,8 +9,6 @@ use libc::{
     PROT_READ, PROT_WRITE, mremap, sysconf,
 };
 
-const DEFAULT_PAGE_SIZE: usize = 4096;
-
 type Page = UnsafeCell<[u8]>;
 
 /// An allocator for managing entire pages of memory
@@ -44,7 +42,7 @@ struct PageArray {
 }
 
 impl PageArray {
-    const fn last_addr(&self, page_size: usize) -> *mut c_void {
+    const fn _last_addr(&self, page_size: usize) -> *mut c_void {
         unsafe { self.buffer.byte_add(page_size * self.allocated - 1).cast() }
     }
 
@@ -77,6 +75,7 @@ fn map_generic(base: *mut c_void, size: usize, flags: c_int) -> Result<*mut c_vo
     let ptr = unsafe { libc::mmap(base, size, PROT_READ | PROT_WRITE, flags, -1, 0) };
 
     if ptr == MAP_FAILED {
+        println!("failed");
         return Err(AllocError);
     }
 
@@ -87,7 +86,7 @@ fn map_arbitrary(size: usize) -> Result<*mut c_void, AllocError> {
     map_generic(ptr::null_mut(), size, MAP_ANONYMOUS | MAP_SHARED)
 }
 
-fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, AllocError> {
+fn _map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, AllocError> {
     map_generic(
         base.cast(),
         size,
@@ -96,7 +95,7 @@ fn map_fixed<T>(base: *mut T, size: usize) -> Result<*mut c_void, AllocError> {
 }
 
 impl ArrayPageAllocator<'_> {
-    fn current_page_array(&mut self) -> &mut PageArray {
+    fn _current_page_array(&mut self) -> &mut PageArray {
         &mut self.array_buffer[self.array_count as usize - 1]
     }
 
@@ -117,7 +116,7 @@ impl ArrayPageAllocator<'_> {
 }
 
 impl PageAllocator for ArrayPageAllocator<'_> {
-    unsafe fn request_page(&mut self) -> Result<*mut [u8], AllocError> {
+    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
         let page_array_count = self.array_count as usize;
         assert!(page_array_count < 12);
         // TODO Write code to resize header buffer
@@ -136,10 +135,7 @@ impl PageAllocator for ArrayPageAllocator<'_> {
         self.array_buffer[page_array_count] = new_page_array;
         self.array_count += 1;
 
-        Ok(slice_from_raw_parts_mut(
-            new_base_page.cast(),
-            self.page_size,
-        ))
+        Ok(new_base_page.cast())
     }
 
     unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {

@@ -5,7 +5,7 @@ use core::{
     ptr::NonNull,
 };
 
-const BUF_SIZE: usize = (4096 * 2) + size_of::<usize>();
+const BUF_SIZE: usize = (4096 * 2) / (size_of::<usize>() / size_of::<u8>()) + size_of::<usize>();
 
 /// Allocator shaped like a stack
 /// Allows the allocation and deallocation of memory in a LIFO system
@@ -76,38 +76,41 @@ const BUF_SIZE: usize = (4096 * 2) + size_of::<usize>();
 /// - Calling `StackAllocator::deallocate` in an out of order manner will not panic, it will cause
 /// a silent failure
 pub struct StackAllocator {
-    buf: UnsafeCell<[u8; BUF_SIZE]>,
+    buf: UnsafeCell<[usize; BUF_SIZE]>,
 }
 
 impl StackAllocator {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         let mut buf = UnsafeCell::new([0; BUF_SIZE]);
-        let ptr = buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize;
+
+        let ptr = buf.get_mut().as_mut_ptr().cast::<usize>();
         unsafe { ptr.write(size_of::<usize>()) };
-        StackAllocator { buf }
+
+        Self { buf }
     }
 
     #[inline]
-    pub fn get_offset(&self) -> usize {
-        unsafe { (self.buf.get() as *mut usize).read() }
+    pub const fn get_offset(&self) -> usize {
+        unsafe { (self.buf.get().cast::<usize>()).read() }
     }
 
     #[inline]
-    pub fn set_offset(&mut self, n: usize) {
-        unsafe { (self.buf.get_mut() as *mut [u8; BUF_SIZE] as *mut usize).write(n) }
+    pub const fn set_offset(&mut self, n: usize) {
+        unsafe { (self.buf.get_mut().as_mut_ptr().cast::<usize>()).write(n) }
     }
 
-    pub fn add_offset(&self, n: usize) {
+    pub const fn add_offset(&self, n: usize) {
         unsafe {
-            let ptr = self.buf.get() as *mut usize;
+            let ptr = self.buf.get().cast::<usize>();
             let value = ptr.read();
             ptr.write(value + n);
         }
     }
 
-    pub fn sub_offset(&self, n: usize) {
+    pub const fn sub_offset(&self, n: usize) {
         unsafe {
-            let ptr = self.buf.get() as *mut usize;
+            let ptr = self.buf.get().cast::<usize>();
             let value = ptr.read();
             ptr.write(value - n);
         }
