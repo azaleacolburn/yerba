@@ -127,7 +127,10 @@ where
         }
 
         let new_data_ptr = unsafe { header.data.byte_add(new_size) };
-        self.add_header(new_data_ptr, next_size);
+        if let Err(err) = self.add_header(new_data_ptr, next_size) {
+            println!("Error on adding split header: {err:?}");
+            return;
+        }
 
         unsafe {
             header_ptr.as_mut().size = new_size;
@@ -317,7 +320,7 @@ where
                 !searching_header.used && get_next_block(&header) == searching_header.data
             };
             let is_adjacent_before = |searching_header: &MappedHeader| {
-                !searching_header.used && get_next_block(&searching_header) == header.data
+                !searching_header.used && get_next_block(searching_header) == header.data
             };
 
             // This traverses twice, which is annoying

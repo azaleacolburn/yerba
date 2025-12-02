@@ -6,7 +6,6 @@ use crate::inline_header::InlineHeader;
 /// The most significant bit of the offset is used to mark whether the block is used
 /// Thus you should never access offset field directly, instead, use the provided API
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
 pub struct UnderlyingLinkedHeader {
     size: usize,
     next: Option<LinkedHeader>,
@@ -48,7 +47,7 @@ impl InlineHeader for LinkedHeader {
     }
 
     fn get_offset(&self) -> usize {
-        unsafe { (self.0.read()).offset & (0 as usize) << (size_of::<usize>() * 8 - 1) }
+        unsafe { (self.0.read()).offset & 0_usize << (usize::BITS as usize - 1) }
     }
 
     fn set_offset(&mut self, offset: usize) {
@@ -66,7 +65,7 @@ impl InlineHeader for LinkedHeader {
 
     fn set_used(&mut self, used: bool) {
         unsafe {
-            let k = size_of::<usize>() * 8 - 1;
+            let k = usize::BITS as usize - 1;
             self.0.as_mut().offset &= 0 << k;
             self.0.as_mut().offset &= usize::from(used) << k;
         }
@@ -186,10 +185,7 @@ impl From<NonNull<UnderlyingLinkedHeader>> for LinkedHeader {
 impl LinkedHeader {
     fn is_last_block(self) -> bool {
         let next = unsafe { self.read().next };
-        match next {
-            Some(_) => true,
-            None => false,
-        }
+        next.is_some()
     }
 
     const fn set_next_some(&mut self, next: Self) {

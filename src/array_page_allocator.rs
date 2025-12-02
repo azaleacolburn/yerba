@@ -116,7 +116,7 @@ impl ArrayPageAllocator<'_> {
 }
 
 impl PageAllocator for ArrayPageAllocator<'_> {
-    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
+    fn request_page(&mut self) -> Result<*mut u8, AllocError> {
         let page_array_count = self.array_count as usize;
         assert!(page_array_count < 12);
         // TODO Write code to resize header buffer
@@ -138,7 +138,7 @@ impl PageAllocator for ArrayPageAllocator<'_> {
         Ok(new_base_page.cast())
     }
 
-    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
+    fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
         unsafe {
             let address = self.request_page()?;
             assert!(!address.is_null());
@@ -174,7 +174,6 @@ impl PageAllocator for ArrayPageAllocator<'_> {
 
         // TODO Make code style choices
         (0..page_array_count)
-            .into_iter()
             .map(|i| self.array_buffer[i].loaned)
             .sum()
     }

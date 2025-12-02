@@ -38,7 +38,7 @@ where
     ///
     /// # Safety
     /// - Neither `A::alloc` nor `F::alloc` may panic if allocation fails, they must instead return a
-    /// null pointer
+    ///   null pointer
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let data_ptr = self.main_allocator.allocate(layout);
         match data_ptr {
@@ -52,7 +52,7 @@ where
     /// # Safety
     /// - Neither `A::dealloc` nor `F::dealloc` may panic if the specified pointer is not available
     ///     - This may be changed in the future if `FallbackAllocator` is expanded to hold the bounds
-    ///     of both sub allocators
+    ///       of both sub allocators
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         unsafe {
             self.main_allocator.deallocate(ptr, layout);

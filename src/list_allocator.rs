@@ -102,40 +102,38 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
     /// - `header_ptr`: the header pointer to be ultimately returned
     /// - `size`: the requested size of the block the header pointer will represent
     /// - `alignment_offset`: the calculated offset to be added to
-    ///     the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
-    ///     is of type `*mut T`
+    ///   the `data_ptr` that `header_ptr` represents, to align it to `T`, where `data_ptr`
+    ///   is of type `*mut T`.
     /// # Errors
     /// Returns an `AllocError` if
     /// - A new page contiguous page cannot be allocated, see `A::request_page` for details
     /// # Panics
     /// - If the totah allocated space after allocating the new page isn't equal to `2 * PAGE_SIZE`
     pub fn add_page(&self, size: usize) -> Result<(), AllocError> {
-        unsafe {
-            let mut header = self.last_block();
-            let initial_header_size = header.size();
+        let mut header = self.last_block();
+        let initial_header_size = header.size();
 
-            // Fails if the new page is null or not contiguous with the old one
-            let new_page = self.page_allocator.borrow_mut().request_page()?;
-            assert!(!new_page.is_null());
-            let page_size = self.page_allocator.borrow().get_page_size();
-            header.set_size(initial_header_size + page_size);
-            header.try_split_allocated_block(size, self.last_addr());
+        // Fails if the new page is null or not contiguous with the old one
+        let new_page = self.page_allocator.borrow_mut().request_page()?;
+        assert!(!new_page.is_null());
+        let page_size = self.page_allocator.borrow().get_page_size();
+        header.set_size(initial_header_size + page_size);
+        header.try_split_allocated_block(size, self.last_addr());
 
-            let allocated_space = self.last_addr() - self.buf_ptr().addr();
-            assert_eq!(2 * page_size, allocated_space);
+        let allocated_space = self.last_addr() - self.buf_ptr().addr();
+        assert_eq!(2 * page_size, allocated_space);
 
-            // NOTE This should be covered by spliting the expanded top block
-            // let remaining_size = self.last_addr()
-            //     - size_of::<Header>() * 2
-            //     - alignment_offset
-            //     - size
-            //     - self.buf_ptr().addr();
-            //
-            // let new_top_header = Header::new(remaining_size);
-            // let top_header_ptr = self.next_header(&old_last_header);
-            // assert!(!top_header_ptr.is_null());
-            // top_header_ptr.write(new_top_header);
-        }
+        // NOTE This should be covered by spliting the expanded top block
+        // let remaining_size = self.last_addr()
+        //     - size_of::<Header>() * 2
+        //     - alignment_offset
+        //     - size
+        //     - self.buf_ptr().addr();
+        //
+        // let new_top_header = Header::new(remaining_size);
+        // let top_header_ptr = self.next_header(&old_last_header);
+        // assert!(!top_header_ptr.is_null());
+        // top_header_ptr.write(new_top_header);
 
         Ok(())
     }
@@ -165,7 +163,7 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
             if header_ptr.used() {
                 last_header_ptr.replace(*header_ptr);
                 // If the block is used, there must be another block
-                let next_block = &self.next_header(&header_ptr).ok_or(AllocError)?;
+                let next_block = &self.next_header(header_ptr).ok_or(AllocError)?;
                 curr_header_ptr.replace(*next_block);
 
                 continue;
@@ -202,8 +200,8 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
             }
 
             last_header_ptr = Some(*header_ptr);
-            let next_header = &self.next_header(&header_ptr);
-            if matches!(next_header, None) {
+            let next_header = &self.next_header(header_ptr);
+            if next_header.is_none() {
                 let pre = self.last_addr();
                 self.add_page(size)?;
                 let post = self.last_addr();
@@ -214,7 +212,7 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
             curr_header_ptr = *next_header;
         }
 
-        curr_header_ptr.ok_or_else(|| AllocError)
+        curr_header_ptr.ok_or(AllocError)
     }
 
     #[inline]
@@ -318,12 +316,9 @@ where
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {
         let mut block = self.find_ptr_block(ptr);
-        match block {
-            Some(ref mut block_ptr) => {
-                block_ptr.mark_free();
-                block_ptr.set_offset(0);
-            }
-            None => return,
+        if let Some(ref mut block_ptr) = block {
+            block_ptr.mark_free();
+            block_ptr.set_offset(0);
         }
     }
 
@@ -336,7 +331,7 @@ where
         let new_size = new_layout.size();
 
         // First look forward for adjacent free blocks
-        let mut header_ptr = self.find_ptr_block(ptr).ok_or_else(|| AllocError)?;
+        let mut header_ptr = self.find_ptr_block(ptr).ok_or(AllocError)?;
         header_ptr.mark_free();
         let mut frontier_ptr = self.next_header(&header_ptr);
         let mut acc_size = header_ptr.size();
@@ -419,7 +414,7 @@ where
             return Err(AllocError);
         }
 
-        return Ok(data_ptr);
+        Ok(data_ptr)
     }
 }
 

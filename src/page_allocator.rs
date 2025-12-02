@@ -3,14 +3,19 @@ use core::alloc::AllocError;
 pub trait PageAllocator {
     /// # Errors
     /// If the page cannot be allocated, likely if a call to `libc::mmap` failed
-    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError>;
+    fn request_page(&mut self) -> Result<*mut u8, AllocError>;
     /// # Errors
-    /// If the page cannot be allocated, likely if a call to `libc::mmap` failed
-    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError>;
+    /// - If the page cannot be allocated, likely if a call to `libc::mmap` failed
+    fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError>;
+    /// # Safety
+    /// - The given `ptr` must be a valid page pointer returned by this allocator
+    /// - The page represented by the `ptr` must not have been relinquished already
     unsafe fn relinquish_page(&mut self, ptr: *mut u8);
     /// Attempts to extend a given allocated block by `added_size`, returns true if it was able to
     /// extend the block, false otherwise
     /// Does not attempt to allocate a new page if the current one could not be extended
+    /// # Safety
+    /// - The given `ptr` must be a valid page pointer returned by this allocator
     unsafe fn extend_page(&mut self, ptr: *mut u8, added_size: usize) -> bool;
     fn get_pages_allocated(&self) -> usize;
     fn get_page_size(&self) -> usize;
@@ -31,13 +36,13 @@ where
     A: PageAllocator,
 {
     #[inline]
-    unsafe fn request_page(&mut self) -> Result<*mut u8, AllocError> {
-        unsafe { (**self).request_page() }
+    fn request_page(&mut self) -> Result<*mut u8, AllocError> {
+        (**self).request_page()
     }
 
     #[inline]
-    unsafe fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
-        unsafe { (**self).request_page_zeroed() }
+    fn request_page_zeroed(&mut self) -> Result<*mut u8, AllocError> {
+        (**self).request_page_zeroed()
     }
 
     #[inline]

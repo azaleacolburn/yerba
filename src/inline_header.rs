@@ -12,6 +12,8 @@ where
 {
     type Header;
 
+    /// # Safety
+    /// - The given `ptr` must not be null
     unsafe fn new<T: ?Sized>(ptr: *mut T) -> Self;
 
     /// Gets the offset of the memory in the block represented by this header
@@ -65,6 +67,8 @@ where
     }
 
     /// Gets the next header
+    /// # Safety
+    /// - The next header must be valid and exist
     #[must_use]
     unsafe fn next_unchecked(&self) -> Self;
 

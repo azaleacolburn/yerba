@@ -70,11 +70,11 @@ const BUF_SIZE: usize = (4096 * 2) / (size_of::<usize>() / size_of::<u8>()) + si
 ///
 /// # Notes
 /// - Future iterations (or future allocators) may be LIFO and allow buffer growth as well as
-/// custom initial buffer sizes
+///   custom initial buffer sizes
 ///
 /// # Safety
 /// - Calling `StackAllocator::deallocate` in an out of order manner will not panic, it will cause
-/// a silent failure
+///   a silent failure
 pub struct StackAllocator {
     buf: UnsafeCell<[usize; BUF_SIZE]>,
 }
@@ -151,7 +151,7 @@ unsafe impl Allocator for StackAllocator {
 
         self.add_offset(size);
 
-        Ok(to_non_null_slice(ptr, size)?)
+        to_non_null_slice(ptr, size)
     }
 
     /// If ptr was not to the last allocated object, nothing happens

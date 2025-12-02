@@ -38,12 +38,12 @@ impl UnderlyingContiguousHeader {
 /// This, of course, is not the case if you pass in a specific instance of a `PageAllocator` with
 /// `ListALlocator::with_allocator`
 ///
-///# Especially suitable for
+/// # Especially suitable for
 /// - Lots of small-midsized allocations/reallocations
 ///
 /// # Limitations
 /// - Fails to allocate/reallocate if there isn't enough space in the underlying buffer and the system call to
-/// request more contiguous memory fails.
+///   request more contiguous memory fails.
 /// - Not suitable for large allocations/reallocations or multithreaded code//
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContiguousHeader(NonNull<UnderlyingContiguousHeader>);
@@ -62,7 +62,7 @@ impl InlineHeader for ContiguousHeader {
     }
 
     fn get_offset(&self) -> usize {
-        unsafe { (self.0.read()).offset & (0 as usize) << (size_of::<usize>() * 8 - 1) }
+        unsafe { (self.0.read()).offset & 0_usize << (usize::BITS as usize - 1) }
     }
 
     fn set_offset(&mut self, offset: usize) {
@@ -80,7 +80,7 @@ impl InlineHeader for ContiguousHeader {
 
     fn set_used(&mut self, used: bool) {
         unsafe {
-            let k = size_of::<usize>() * 8 - 1;
+            let k = usize::BITS as usize - 1;
             self.0.as_mut().offset &= 0 << k;
             self.0.as_mut().offset &= usize::from(used) << k;
         }
