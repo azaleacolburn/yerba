@@ -82,14 +82,13 @@ where
         let page_size = page_allocator.get_page_size();
 
         // The pages being allocated are overlapping here
-        let blocks_buffer = unsafe { page_allocator.request_page_zeroed()?.cast::<u8>() };
+        let blocks_buffer = page_allocator.request_page_zeroed()?.cast::<u8>();
 
         // NOTE
         // This cast is fine because the given pointer is guaranteed
         // to be aligned to the system's page size
         #[allow(clippy::cast_ptr_alignment)]
-        let headers_buffer =
-            unsafe { page_allocator.request_page_zeroed()?.cast::<MappedHeader>() };
+        let headers_buffer = page_allocator.request_page_zeroed()?.cast::<MappedHeader>();
         assert!(!headers_buffer.is_null() && !blocks_buffer.is_null());
 
         let initial_header = MappedHeader {
@@ -119,21 +118,22 @@ where
 
     fn try_split_block(&self, mut header_ptr: NonNull<MappedHeader>, new_size: usize) {
         let header = unsafe { header_ptr.read() };
-        let next_size = header.size - new_size;
+        let new_total_size = new_size + header.offset;
+        let next_size = header.size - new_total_size;
 
-        // This is the arbitrary place at which we deep it not worth it
+        // This is the arbitrary place at which we deem it not worth it
         if next_size < size_of::<MappedHeader>() {
             return;
         }
 
-        let new_data_ptr = unsafe { header.data.byte_add(new_size) };
+        let new_data_ptr = unsafe { header.data.byte_add(new_total_size) };
         if let Err(err) = self.add_header(new_data_ptr, next_size) {
             println!("Error on adding split header: {err:?}");
             return;
         }
 
         unsafe {
-            header_ptr.as_mut().size = new_size;
+            header_ptr.as_mut().size = new_total_size;
         }
     }
 
@@ -249,11 +249,7 @@ where
             let mut allocator = self.page_allocator.borrow_mut();
             let page_size = allocator.get_page_size();
 
-            let page = unsafe {
-                let page = allocator.request_page()?;
-                NonNull::new(page).ok_or(AllocError)?
-            };
-
+            let page = NonNull::new(allocator.request_page()?).ok_or(AllocError)?;
             return self.add_header(page, page_size);
         };
 

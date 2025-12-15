@@ -1,5 +1,5 @@
 #![feature(allocator_api)]
-#![feature(slice_ptr_get)]
+// #![feature(slice_ptr_get)]
 // #![no_std]
 #![allow(static_mut_refs)]
 

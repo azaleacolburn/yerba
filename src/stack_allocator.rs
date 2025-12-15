@@ -101,16 +101,16 @@ impl StackAllocator {
     }
 
     pub const fn add_offset(&self, n: usize) {
+        let ptr = self.buf.get().cast::<usize>();
         unsafe {
-            let ptr = self.buf.get().cast::<usize>();
             let value = ptr.read();
             ptr.write(value + n);
         }
     }
 
     pub const fn sub_offset(&self, n: usize) {
+        let ptr = self.buf.get().cast::<usize>();
         unsafe {
-            let ptr = self.buf.get().cast::<usize>();
             let value = ptr.read();
             ptr.write(value - n);
         }
@@ -118,9 +118,10 @@ impl StackAllocator {
 
     #[inline]
     pub fn is_top(&self, ptr: NonNull<u8>, size: usize) -> bool {
-        unsafe {
-            usize::from(ptr.addr()) + size == self.buf.get().byte_add(self.get_offset()).addr()
-        }
+        let end_of_block = usize::from(ptr.addr()) + size;
+        let end_of_buffer = unsafe { self.buf.get().byte_add(self.get_offset()).addr() };
+
+        end_of_block == end_of_buffer
     }
 }
 
@@ -174,8 +175,10 @@ unsafe impl Allocator for StackAllocator {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
         let new_size = new_layout.size();
+
         let top = unsafe { self.buf.get().byte_add(self.get_offset()).addr() };
         assert_eq!(usize::from(ptr.addr()) + size, top);
+
         self.add_offset(new_size - size);
 
         Ok(NonNull::slice_from_raw_parts(ptr, new_size))
