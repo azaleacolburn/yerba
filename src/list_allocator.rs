@@ -65,10 +65,31 @@ where
 {
     buf: *mut UnsafeCell<[u8]>,
     page_allocator: RefCell<A>,
+    extend: bool,
     phantom: PhantomData<&'a H>,
 }
 
 impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
+    /// Creates a new contiguous list allocator with a given `PageAllocator` instance
+    /// Sets the allocator to never extend itself and allocate more space. This is helpful when creating garbage collection
+    /// wrappers.
+    ///
+    /// # Errors
+    /// - If the first page cannot be allocated
+    pub fn with_allocator_no_reallocate(mut page_allocator: A) -> Result<Self, AllocError> {
+        let first_block = H::initialize_header(&mut page_allocator)?;
+
+        let buf = slice_from_raw_parts_mut(first_block, page_allocator.get_page_size())
+            as *mut UnsafeCell<[u8]>;
+
+        Ok(Self {
+            buf,
+            page_allocator: RefCell::new(page_allocator),
+            extend: false,
+            phantom: PhantomData,
+        })
+    }
+
     /// Creates a new contiguous list allocator with a given `PageAllocator` instance
     ///
     /// # Errors
@@ -82,6 +103,7 @@ impl<A: PageAllocator, H: InlineHeader> ListAllocator<'_, A, H> {
         Ok(Self {
             buf,
             page_allocator: RefCell::new(page_allocator),
+            extend: true,
             phantom: PhantomData,
         })
     }

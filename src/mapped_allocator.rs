@@ -67,6 +67,7 @@ where
     headers_allocated: Cell<usize>,
 
     page_allocator: RefCell<A>,
+    should_realloc: bool,
     marker: PhantomData<&'a A>,
 }
 
@@ -76,6 +77,13 @@ where
 {
     const fn headers(&self) -> NonNull<MappedHeader> {
         self.headers.get()
+    }
+
+    pub fn with_allocator_no_realloc(page_allocator: A) -> Result<Self, AllocError> {
+        let mut allocator = MappedAllocator::with_allocator(page_allocator)?;
+        allocator.should_realloc = false;
+
+        Ok(allocator)
     }
 
     fn with_allocator(mut page_allocator: A) -> Result<Self, AllocError> {
@@ -105,6 +113,7 @@ where
                 header_buffer_size: page_size,
                 headers_allocated: Cell::new(1),
                 page_allocator: RefCell::new(page_allocator),
+                should_realloc: true,
                 marker: PhantomData,
             })
         }

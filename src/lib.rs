@@ -9,6 +9,7 @@ extern crate std;
 pub mod array_page_allocator;
 pub mod contiguous_header;
 pub mod fallback_allocator;
+pub mod gc;
 pub mod inline_header;
 pub mod linked_header;
 pub mod list_allocator;

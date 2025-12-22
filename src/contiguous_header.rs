@@ -173,16 +173,14 @@ impl InlineHeader for ContiguousHeader {
         assert!(header_size < page_allocator.get_page_size());
         assert!(header_size.is_multiple_of(8));
 
-        let page_ptr = unsafe {
-            // NOTE
-            // This is fine because the returned page
-            // is guaranteed to be aligned to the system's
-            // page size which is greater than 8-bytes.
-            #[allow(clippy::cast_ptr_alignment)]
-            page_allocator
-                .request_page_zeroed()?
-                .cast::<UnderlyingContiguousHeader>()
-        };
+        // NOTE
+        // This is fine because the returned page
+        // is guaranteed to be aligned to the system's
+        // page size which is greater than 8-bytes.
+        #[allow(clippy::cast_ptr_alignment)]
+        let page_ptr = page_allocator
+            .request_page_zeroed()?
+            .cast::<UnderlyingContiguousHeader>();
         assert!(!page_ptr.is_null(), "Failed to allocate the first page");
 
         let head = UnderlyingContiguousHeader::with_size(page_allocator.get_page_size());
